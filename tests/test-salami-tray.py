@@ -68,6 +68,18 @@ class SalamiTrayModelTests(unittest.TestCase):
         self.assertIn("放电 4.8 W", l1)
         self.assertIn("剩 1h30m", l1)
 
+    def test_no_level3_nested_submenus_for_appindicator_compatibility(self):
+        # ubuntu-appindicators renders level-2 submenus as accordions and cannot expand level-3 submenus.
+        src = SOURCE.read_text(encoding="utf-8")
+        # Only top-level self.item_* entries may call .set_submenu(...).
+        for lineno, line in enumerate(src.splitlines(), 1):
+            if ".set_submenu(" in line:
+                self.assertIn(
+                    "self.item_",
+                    line,
+                    f"nested level-3 submenu at salami-tray:{lineno}: {line.strip()}",
+                )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

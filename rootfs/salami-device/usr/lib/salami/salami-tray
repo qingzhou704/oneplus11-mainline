@@ -333,8 +333,8 @@ def run_tray() -> int:
             self.item_rdp.set_submenu(rdp_sub)
             self.menu.append(self.item_rdp)
 
-            # 6. Network & Services submenu
-            self.item_srv = Gtk.MenuItem(label="网络与服务")
+            # 6. Network & Diagnostics submenu (strictly 2-level: ubuntu-appindicators cannot expand level-3 submenus)
+            self.item_srv = Gtk.MenuItem(label="网络与体检")
             srv_sub = Gtk.Menu()
             self.lbl_modem = Gtk.MenuItem(label="5G 基带读取中...", sensitive=False)
             srv_sub.append(self.lbl_modem)
@@ -388,26 +388,34 @@ def run_tray() -> int:
             )
             srv_sub.append(trim_item)
 
-            self.svc_items: dict[str, tuple[Gtk.MenuItem, Gtk.MenuItem, Gtk.MenuItem, str, str]] = {}
-            self._managed_services = ctl.discover_managed_services()
-            if self._managed_services:
-                srv_sub.append(Gtk.SeparatorMenuItem())
-                for unit, title, act in self._managed_services:
-                    verb = "重载" if act == "reload" else "重启"
-                    it = Gtk.MenuItem(label=title)
-                    sub = Gtk.Menu()
-                    act_item = Gtk.MenuItem(label=f"{verb} {title}")
-                    act_item.connect("activate", self._on_service_primary, unit, title, act)
-                    stop_item = Gtk.MenuItem(label=f"停止 {title}")
-                    stop_item.connect("activate", self._on_service_action, unit, title, "stop")
-                    sub.append(act_item)
-                    sub.append(stop_item)
-                    it.set_submenu(sub)
-                    self.svc_items[unit.removesuffix(".service")] = (it, act_item, stop_item, title, act)
-                    srv_sub.append(it)
-
             self.item_srv.set_submenu(srv_sub)
             self.menu.append(self.item_srv)
+
+            # 7. Managed Services submenu (flat level-2: primary restart/start + direct stop actions)
+            self.item_tasks = Gtk.MenuItem(label="服务管理")
+            tasks_sub = Gtk.Menu()
+            self.svc_items: dict[str, tuple[Gtk.MenuItem, Gtk.MenuItem, str, str]] = {}
+            self._managed_services = ctl.discover_managed_services()
+            if self._managed_services:
+                stop_items: list[Gtk.MenuItem] = []
+                for unit, title, act in self._managed_services:
+                    verb = "重载" if act == "reload" else "重启"
+                    act_item = Gtk.MenuItem(label=f"{verb} {title}")
+                    act_item.connect("activate", self._on_service_primary, unit, title, act)
+                    tasks_sub.append(act_item)
+                    stop_item = Gtk.MenuItem(label=f"停止 {title}")
+                    stop_item.connect("activate", self._on_service_action, unit, title, "stop")
+                    stop_items.append(stop_item)
+                    self.svc_items[unit.removesuffix(".service")] = (act_item, stop_item, title, act)
+                tasks_sub.append(Gtk.SeparatorMenuItem())
+                tasks_sub.append(Gtk.MenuItem(label="点击直接停止运行中的任务", sensitive=False))
+                for stop_item in stop_items:
+                    tasks_sub.append(stop_item)
+            else:
+                tasks_sub.append(Gtk.MenuItem(label="暂无已启用的托管服务", sensitive=False))
+
+            self.item_tasks.set_submenu(tasks_sub)
+            self.menu.append(self.item_tasks)
             self.menu.show_all()
 
         def _on_timer(self) -> bool:
@@ -506,15 +514,16 @@ def run_tray() -> int:
 
                     svcs = self._last_net.get("services") or {}
                     svc_ok = sum(1 for v in svcs.values() if v == "active")
-                    self.item_srv.set_label(f"网络与服务  ({svc_ok}/{len(svcs)} 正常)")
-                    for key, (item, act_item, stop_item, title, act) in self.svc_items.items():
+                    self.item_srv.set_label(f"网络与体检  ({self._last_net.get('connectivity', '?')})")
+                    self.item_tasks.set_label(f"服务管理  ({svc_ok}/{len(svcs)} 运行中)")
+                    for key, (act_item, stop_item, title, act) in self.svc_items.items():
                         verb = "重载" if act == "reload" else "重启"
                         st = svcs.get(key, "?")
                         active = st == "active"
-                        state_txt = "运行中" if active else st
-                        item.set_label(f"{title} [{state_txt}]")
-                        act_item.set_label(f"{verb} {title}" if active else f"启动 {title}")
-                        stop_item.set_sensitive(active)
+                        act_item.set_label(f"{verb} {title} [运行中]" if active else f"启动 {title} [已停止]")
+                        if stop_item is not None:
+                            stop_item.set_visible(active)
+                            stop_item.set_sensitive(active)
             finally:
                 self._updating = False
 
