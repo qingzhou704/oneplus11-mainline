@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline unit tests for salami-tray top-bar label, icon, and menu model logic."""
+"""Offline unit tests for salami-tray clean emoji-free top-bar label, icon, and summary lines."""
 from importlib.machinery import SourceFileLoader
 import importlib.util
 from pathlib import Path
@@ -32,34 +32,33 @@ class SalamiTrayModelTests(unittest.TestCase):
             "network": {"tcp_congestion_control": "bbr", "default_qdisc": "fq"},
         }
 
-    def test_indicator_label_and_icon_for_charging_and_perf_modes(self):
+    def test_indicator_label_and_icon_are_clean_without_emojis(self):
         st_idle = self._sample_status(mode="balanced", watts=0.0)
         self.assertEqual(tray.format_indicator_label(st_idle), " 82% · 32°C")
         self.assertEqual(tray.choose_indicator_icon(st_idle), "phone-symbolic")
 
         st_vooc = self._sample_status(mode="balanced", watts=38.4, cpu_t=39.1)
-        self.assertEqual(tray.format_indicator_label(st_vooc), " ⚡38W · 39°C")
+        self.assertEqual(tray.format_indicator_label(st_vooc), " 38W · 39°C")
         self.assertEqual(tray.choose_indicator_icon(st_vooc), "battery-good-charging-symbolic")
 
         st_eco = self._sample_status(mode="eco", watts=0.0, cpu_t=28.0)
-        self.assertEqual(tray.format_indicator_label(st_eco), " 🌿 82% · 28°C")
+        self.assertEqual(tray.format_indicator_label(st_eco), " 82% · 28°C")
         self.assertEqual(tray.choose_indicator_icon(st_eco), "power-profile-power-saver-symbolic")
 
         st_perf = self._sample_status(mode="performance", watts=0.0, cpu_t=41.0)
-        self.assertEqual(tray.format_indicator_label(st_perf), " 🚀 82% · 41°C")
+        self.assertEqual(tray.format_indicator_label(st_perf), " 82% · 41°C")
         self.assertEqual(tray.choose_indicator_icon(st_perf), "power-profile-performance-symbolic")
 
-    def test_nearest_preset_and_summary_lines(self):
+    def test_nearest_preset_and_compact_two_line_summary(self):
         self.assertEqual(tray.nearest_preset(31, tray.BRIGHTNESS_PRESETS), 35)
         self.assertEqual(tray.nearest_preset(98, tray.BRIGHTNESS_PRESETS), 100)
         self.assertEqual(tray.nearest_preset(55, tray.TORCH_PRESETS[1:]), 64)
 
         net = {"connectivity": "full", "services": {"ssh": "active", "nginx": "active"}}
-        l_bat, l_temp, l_mem, l_net = tray.format_summary_lines(self._sample_status(), net)
-        self.assertIn("75–80% 限充", l_bat)
-        self.assertIn("CPU 32.4 °C", l_temp)
-        self.assertIn("UFS [none/256K]", l_mem)
-        self.assertIn("服务 2/2 正常", l_net)
+        l1, l2 = tray.format_summary_lines(self._sample_status(), net)
+        self.assertIn("限充 80%", l1)
+        self.assertIn("CPU 32.4 °C", l2)
+        self.assertIn("服务 2/2", l2)
 
 
 if __name__ == "__main__":

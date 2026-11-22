@@ -1,0 +1,13 @@
+{
+  "uuid": "salami-control-center@oneplus11",
+  "name": "OnePlus 11 Control Center",
+  "description": "Clean two-level cascading top-bar hardware and server control center for OnePlus 11",
+  "shell-version": [
+    "49",
+    "50"
+  ],
+  "session-modes": [
+    "user",
+    "ubuntu"
+  ]
+}

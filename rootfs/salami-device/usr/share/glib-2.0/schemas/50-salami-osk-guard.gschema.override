@@ -1,2 +1,2 @@
 [org.gnome.shell]
-enabled-extensions=['salami-osk-guard@oneplus11']
+enabled-extensions=['salami-osk-guard@oneplus11', 'salami-control-center@oneplus11']

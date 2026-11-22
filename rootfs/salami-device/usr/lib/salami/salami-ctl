@@ -943,8 +943,9 @@ def collect_net_and_services(paths: SysfsPaths = SysfsPaths()) -> dict[str, Any]
     )
     nm_conn = _run_cmd(["nmcli", "networking", "connectivity"]) or "unknown"
     modem = collect_modem_status()
+    managed = discover_managed_services(paths)
     units_to_check = list(BASE_HEALTH_UNITS)
-    for unit, _label, _act in discover_managed_services(paths):
+    for unit, _label, _act in managed:
         if unit not in units_to_check:
             units_to_check.append(unit)
     services: dict[str, str] = {}
@@ -960,6 +961,7 @@ def collect_net_and_services(paths: SysfsPaths = SysfsPaths()) -> dict[str, Any]
         "modem": modem,
         "tcp": f"{_read_str(paths.proc_tcp_cc, '?')} + {_read_str(paths.proc_qdisc, '?')}",
         "services": services,
+        "managed_actions": [{"unit": u, "label": l, "verb": v} for u, l, v in managed],
     }
 
 
@@ -1168,6 +1170,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_sec = sub.add_parser("security", help="巡检内核 CVE 缓解、CPU 漏洞免疫、sysctl 加固与防火墙状态")
     p_sec.add_argument("--json", action="store_true", help="输出结构化 JSON")
 
+    p_svc = sub.add_parser("service", help="重启或重载已托管的系统服务")
+    p_svc.add_argument("unit", help="systemd 服务单元名（如 ssh.service）")
+
+    sub.add_parser("fstrim", help="执行 UFS 4.0 全盘闪存 TRIM 优化")
+
     p_vib = sub.add_parser("vibrate", help="触发 X 轴线性马达短震反馈")
     p_vib.add_argument("ms", nargs="?", type=int, default=60, help="震动毫秒数 (15..1000，默认 60)")
 
@@ -1329,11 +1336,33 @@ def main(argv: list[str] | None = None, paths: SysfsPaths = SysfsPaths()) -> int
             raise ValueError("modem 参数须为 status | recover | guard")
 
         if cmd == "security":
+            if os.geteuid() != 0 and paths.proc_sys_dir == SysfsPaths.proc_sys_dir:
+                extra = ["--json"] if getattr(args, "json", False) else []
+                return _reexec_with_sudo(["security", *extra])
             sec = collect_security_status(paths)
             if getattr(args, "json", False):
                 print(json.dumps(sec, ensure_ascii=False, indent=2))
             else:
                 print(format_security_status(sec))
+            return 0
+
+        if cmd == "service":
+            allowed = {u: (lbl, act) for u, lbl, act in discover_managed_services(paths)}
+            unit = args.unit if args.unit.endswith(".service") else f"{args.unit}.service"
+            if unit not in allowed:
+                raise ValueError(f"未授权或未启用的服务单元: {unit}")
+            if os.geteuid() != 0:
+                return _reexec_with_sudo(["service", unit])
+            lbl, act = allowed[unit]
+            subprocess.run(["/usr/bin/systemctl", act, unit], check=True)
+            print(f"{lbl} 已完成{'重载' if act == 'reload' else '重启'}")
+            return 0
+
+        if cmd == "fstrim":
+            if os.geteuid() != 0:
+                return _reexec_with_sudo(["fstrim"])
+            out = subprocess.check_output(["/usr/sbin/fstrim", "-av"], text=True).strip()
+            print(out or "UFS 闪存 TRIM 已完成")
             return 0
 
         if cmd == "rdp":

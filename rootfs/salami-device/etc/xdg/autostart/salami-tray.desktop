@@ -6,5 +6,5 @@ Exec=/usr/bin/systemctl --user start salami-tray.service
 Icon=phone-symbolic
 Terminal=false
 NoDisplay=true
-OnlyShowIn=GNOME;Ubuntu;
+NotShowIn=GNOME;Ubuntu;
 X-GNOME-Autostart-Phase=Application
