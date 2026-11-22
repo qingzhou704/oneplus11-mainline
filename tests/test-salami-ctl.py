@@ -299,6 +299,26 @@ class SalamiCtlTests(unittest.TestCase):
             entries = salami_ctl.discover_managed_services(self.paths)
         self.assertEqual(entries, [("myapp.service", "My Web App", "restart")])
 
+        # Verify service stop, start, default restart, and invalid action rejection
+        with (
+            mock.patch.object(salami_ctl, "_run_cmd", return_value="disabled"),
+            mock.patch.object(salami_ctl.subprocess, "run") as m_run,
+        ):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                self.assertEqual(salami_ctl.main(["service", "myapp.service", "stop"], self.paths), 0)
+            m_run.assert_called_with(["/usr/bin/systemctl", "stop", "myapp.service"], check=True)
+            self.assertIn("已完", buf.getvalue().replace("已完成", "已完"))
+            self.assertIn("停止", buf.getvalue())
+
+            buf2 = io.StringIO()
+            with redirect_stdout(buf2):
+                self.assertEqual(salami_ctl.main(["service", "myapp", "start"], self.paths), 0)
+            m_run.assert_called_with(["/usr/bin/systemctl", "start", "myapp.service"], check=True)
+            self.assertIn("启动", buf2.getvalue())
+
+            self.assertEqual(salami_ctl.main(["service", "myapp.service", "kill"], self.paths), 1)
+
     def test_rdp_qp_presets_and_bounds(self):
         self.assertEqual(salami_ctl.get_rdp_qp(self.paths), 22)
         qp, _ = salami_ctl.set_rdp_qp("fast", self.paths)
@@ -381,6 +401,115 @@ class SalamiCtlTests(unittest.TestCase):
         self.assertEqual(sec["sysctl_ok"], len(salami_ctl.SECURITY_SYSCTL_EXPECT))
         self.assertEqual(sec["cpu_unmitigated"], [])
         self.assertIn("全部就绪", salami_ctl.format_security_status(sec))
+        self.assertIn("0 项未防护", salami_ctl.format_security_status(sec))
+
+        # Verify unmitigated CPU vulnerabilities are dynamically reported, never hardcoded as 0
+        (self.paths.cpu_vuln_dir / "spectre_v2").write_text("Vulnerable: unmitigated\n", encoding="utf-8")
+        sec_vuln = salami_ctl.collect_security_status(self.paths)
+        self.assertEqual(sec_vuln["cpu_unmitigated"], ["spectre_v2"])
+        formatted_vuln = salami_ctl.format_security_status(sec_vuln)
+        self.assertIn("1 项未缓解: spectre_v2", formatted_vuln)
+        self.assertNotIn("0 项未防护", formatted_vuln)
+
+    def test_discharging_negative_power_and_duration_formatting(self):
+        self._write(self.paths.bat_dir / "status", "Discharging")
+        self._write(self.paths.bat_dir / "power_now", "-4250000")
+        data = salami_ctl.collect_status(self.paths)
+        self.assertEqual(data["battery"]["power_w"], 4.25)
+        rendered = salami_ctl.format_status(data)
+        self.assertIn("放电 4.25 W", rendered)
+
+        self.assertEqual(salami_ctl.format_duration_short(0), "")
+        self.assertEqual(salami_ctl.format_duration_short(42), "<1m")
+        self.assertEqual(salami_ctl.format_duration_short(1800), "30m")
+        self.assertEqual(salami_ctl.format_duration_short(3660), "1h01m")
+        self.assertEqual(salami_ctl.format_duration_short(7200), "2h")
+
+    def test_batched_systemd_unit_query_and_cur_mhz_telemetry(self):
+        self._write(self.paths.cpufreq_dir / "policy7" / "scaling_cur_freq", "2419200")
+        self._write(self.paths.gpu_devfreq_dir / "cur_freq", "491000000")
+        perf = salami_ctl.detect_perf_profile(self.paths)
+        self.assertEqual(perf["clusters"]["policy7"]["cur_mhz"], 2419)
+        self.assertEqual(perf["gpu"]["cur_mhz"], 491)
+
+        sample_show = (
+            "Id=ssh.service\nUnitFileState=enabled\nActiveState=active\n\n"
+            "Id=nginx.service\nUnitFileState=disabled\nActiveState=inactive\n"
+        )
+        with mock.patch.object(salami_ctl, "_run_cmd", return_value=sample_show) as mocked:
+            entries = salami_ctl.discover_managed_services(self.paths)
+            self.assertEqual(mocked.call_count, 1)
+        self.assertEqual(entries, [("ssh.service", "SSH 远程服务", "restart")])
+
+    def test_refresh_no_persist_only_updates_runtime_sysfs(self):
+        st = salami_ctl.set_refresh_rate(90, self.paths, persist=False)
+        self.assertTrue(st["runtime_panel_applied"])
+        self.assertTrue(st["runtime_touch_applied"])
+        self.assertFalse(st["persisted"])
+        self.assertFalse(self.paths.refresh_modprobe_conf.exists())
+
+    def test_doctor_pass_warn_and_fail_diagnostics(self):
+        r = Path(self.tmp.name)
+        self.paths.dri_dir = r / "dri"
+        self.paths.dev_dir = r / "dev"
+        self.paths.va_driver_dir = r / "va"
+        self.paths.regdb_file = r / "regulatory.db"
+        self.paths.root_mount = r
+        self.paths.home_mount = r
+        for d in (self.paths.dri_dir, self.paths.dev_dir, self.paths.va_driver_dir):
+            d.mkdir(parents=True, exist_ok=True)
+        for f in (
+            self.paths.dri_dir / "renderD128",
+            self.paths.dev_dir / "video0",
+            self.paths.dev_dir / "video1",
+            self.paths.va_driver_dir / "qcom_drv_video.so",
+            self.paths.regdb_file,
+        ):
+            f.write_text("", encoding="utf-8")
+        for rel, expected in salami_ctl.SECURITY_SYSCTL_EXPECT:
+            p = self.paths.proc_sys_dir / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"{expected}\n", encoding="utf-8")
+        self.paths.cpu_vuln_dir.mkdir(parents=True, exist_ok=True)
+        (self.paths.cpu_vuln_dir / "meltdown").write_text("Not affected\n", encoding="utf-8")
+
+        report = salami_ctl.collect_doctor_report(self.paths, live_override=False)
+        self.assertEqual(report["overall"], "PASS", salami_ctl.format_doctor_report(report))
+        self.assertEqual(report["counts"]["fail"], 0)
+        self.assertEqual(report["counts"]["warn"], 0)
+
+        # Panel/touch refresh mismatch triggers WARN
+        self._write(self.paths.touch_refresh_param, "60")
+        warn_report = salami_ctl.collect_doctor_report(self.paths, live_override=False)
+        self.assertEqual(warn_report["overall"], "WARN")
+        self.assertIn("刷新率不一致", salami_ctl.format_doctor_report(warn_report))
+
+        # Missing GPU render node triggers FAIL and CLI exit code 1
+        (self.paths.dri_dir / "renderD128").unlink()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = salami_ctl.main(["doctor", "--json"], self.paths)
+        self.assertEqual(rc, 1)
+        fail_report = json.loads(buf.getvalue())
+        self.assertEqual(fail_report["overall"], "FAIL")
+
+    def test_watch_frame_tracks_peaks_and_respects_count(self):
+        peaks: dict[str, float] = {}
+        st1 = salami_ctl.collect_status(self.paths)
+        frame1 = salami_ctl.render_watch_frame(st1, peaks, 1.0, 0.0)
+        self.assertIn("峰值 37.80 W", frame1)
+        self.assertIn("CPU 36.5°C", frame1)
+
+        self._write(self.paths.bat_dir / "power_now", "12000000")
+        st2 = salami_ctl.collect_status(self.paths)
+        frame2 = salami_ctl.render_watch_frame(st2, peaks, 1.0, 2.0)
+        self.assertIn("12.00 W (峰值 37.80 W)", frame2)
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = salami_ctl.main(["watch", "-n", "0.5", "--count", "1"], self.paths)
+        self.assertEqual(rc, 0)
+        self.assertIn("实时遥测看板", buf.getvalue())
 
 
 if __name__ == "__main__":

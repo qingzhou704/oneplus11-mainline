@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import select
+import shutil
 import struct
 import subprocess
 import sys
@@ -125,6 +126,12 @@ class SysfsPaths:
     modem_guard_state: Path = Path("/run/salami-modem-guard.json")
     proc_sys_dir: Path = Path("/proc/sys")
     cpu_vuln_dir: Path = Path("/sys/devices/system/cpu/vulnerabilities")
+    dri_dir: Path = Path("/dev/dri")
+    dev_dir: Path = Path("/dev")
+    va_driver_dir: Path = Path("/usr/lib/aarch64-linux-gnu/dri")
+    regdb_file: Path = Path("/lib/firmware/regulatory.db")
+    root_mount: Path = Path("/")
+    home_mount: Path = Path("/home")
 
 
 def _default_grd_env_file() -> Path:
@@ -157,21 +164,29 @@ def detect_perf_profile(paths: SysfsPaths = SysfsPaths()) -> dict[str, Any]:
             gov = _read_str(pol / "scaling_governor", "unknown")
             cur_max = _read_int(pol / "scaling_max_freq", 0) or 0
             hw_max = _read_int(pol / "cpuinfo_max_freq", cur_max) or cur_max
+            cur_freq = _read_int(pol / "scaling_cur_freq")
             govs.append(gov)
             if hw_max > 0 and cur_max < hw_max:
                 capped = True
-            clusters[pol.name] = {
+            entry: dict[str, Any] = {
                 "governor": gov,
                 "max_mhz": round(cur_max / 1000),
                 "hw_max_mhz": round(hw_max / 1000),
             }
+            if cur_freq is not None:
+                entry["cur_mhz"] = round(cur_freq / 1000)
+            clusters[pol.name] = entry
     gpu_min = _read_int(paths.gpu_devfreq_dir / "min_freq")
     gpu_max = _read_int(paths.gpu_devfreq_dir / "max_freq")
-    gpu_info = (
-        {"min_mhz": round(gpu_min / 1_000_000), "max_mhz": round(gpu_max / 1_000_000)}
-        if gpu_min is not None and gpu_max is not None
-        else None
-    )
+    gpu_cur = _read_int(paths.gpu_devfreq_dir / "cur_freq")
+    gpu_info: dict[str, int] | None = None
+    if gpu_min is not None and gpu_max is not None:
+        gpu_info = {
+            "min_mhz": round(gpu_min / 1_000_000),
+            "max_mhz": round(gpu_max / 1_000_000),
+        }
+        if gpu_cur is not None:
+            gpu_info["cur_mhz"] = round(gpu_cur / 1_000_000)
     boost_on = _read_int(paths.cpufreq_boost, 0) == 1
     if govs and all(g == "performance" for g in govs) and not capped:
         mode = "performance"
@@ -253,7 +268,7 @@ def get_refresh_status(paths: SysfsPaths = SysfsPaths()) -> dict[str, int | None
     }
 
 
-def set_refresh_rate(hz: int, paths: SysfsPaths = SysfsPaths()) -> dict[str, Any]:
+def set_refresh_rate(hz: int, paths: SysfsPaths = SysfsPaths(), *, persist: bool = True) -> dict[str, Any]:
     if hz not in VALID_REFRESH_HZ:
         raise ValueError("刷新率仅支持 60 | 90 | 120 Hz")
     runtime_panel = False
@@ -269,30 +284,29 @@ def set_refresh_rate(hz: int, paths: SysfsPaths = SysfsPaths()) -> dict[str, Any
             except OSError:
                 pass
 
-    if paths.refresh_modprobe_conf.parent.exists() and os.access(paths.refresh_modprobe_conf.parent, os.W_OK):
+    persisted = False
+    if persist:
         content = (
             "# Keep panel and touchscreen refresh rates strictly synchronized (60, 90, or 120 Hz).\n"
             "# Managed via `salami-ctl refresh <60|90|120>`.\n"
             f"options panel_samsung_amb670yf07_iris7 refresh={hz}\n"
             f"options synaptics_tcm_i2c refresh={hz}\n"
         )
-        tmp_path = paths.refresh_modprobe_conf.with_suffix(".conf.tmp")
-        tmp_path.write_text(content, encoding="utf-8")
-        os.chmod(tmp_path, 0o644)
-        tmp_path.replace(paths.refresh_modprobe_conf)
-    elif not paths.refresh_modprobe_conf.parent.exists():
-        paths.refresh_modprobe_conf.parent.mkdir(parents=True, exist_ok=True)
-        content = (
-            "# Keep panel and touchscreen refresh rates strictly synchronized (60, 90, or 120 Hz).\n"
-            "# Managed via `salami-ctl refresh <60|90|120>`.\n"
-            f"options panel_samsung_amb670yf07_iris7 refresh={hz}\n"
-            f"options synaptics_tcm_i2c refresh={hz}\n"
-        )
-        paths.refresh_modprobe_conf.write_text(content, encoding="utf-8")
+        if paths.refresh_modprobe_conf.parent.exists() and os.access(paths.refresh_modprobe_conf.parent, os.W_OK):
+            tmp_path = paths.refresh_modprobe_conf.with_suffix(".conf.tmp")
+            tmp_path.write_text(content, encoding="utf-8")
+            os.chmod(tmp_path, 0o644)
+            tmp_path.replace(paths.refresh_modprobe_conf)
+            persisted = True
+        elif not paths.refresh_modprobe_conf.parent.exists():
+            paths.refresh_modprobe_conf.parent.mkdir(parents=True, exist_ok=True)
+            paths.refresh_modprobe_conf.write_text(content, encoding="utf-8")
+            persisted = True
 
     st: dict[str, Any] = dict(get_refresh_status(paths))
     st["runtime_panel_applied"] = runtime_panel
     st["runtime_touch_applied"] = runtime_touch
+    st["persisted"] = persisted
     return st
 
 
@@ -510,6 +524,55 @@ def set_rdp_qp(spec: str, paths: SysfsPaths = SysfsPaths()) -> tuple[int, str]:
     return qp, desc
 
 
+def format_duration_short(seconds: int | None) -> str:
+    if seconds is None or seconds <= 0:
+        return ""
+    if seconds < 60:
+        return "<1m"
+    mins = (seconds + 30) // 60
+    hours, rem_mins = divmod(mins, 60)
+    if hours > 0:
+        return f"{hours}h{rem_mins:02d}m" if rem_mins else f"{hours}h"
+    return f"{rem_mins}m"
+
+
+def get_charge_restore_remaining_s(paths: SysfsPaths = SysfsPaths(), *, now: float | None = None) -> int | None:
+    """Return remaining seconds until salami-charge-restore.timer restores 80% limit, or None."""
+    if paths.bat_dir != SysfsPaths.bat_dir:
+        return None
+    ts_now = time.time() if now is None else now
+    scopes = (["--system"],) if os.geteuid() == 0 else (["--user"], ["--system"])
+    for scope in scopes:
+        out = _run_cmd(
+            [
+                "systemctl",
+                *scope,
+                "show",
+                f"{RESTORE_TIMER_UNIT}.timer",
+                "--timestamp=unix",
+                "--property=ActiveState",
+                "--property=NextElapseUSecRealtime",
+            ]
+        )
+        if not out:
+            continue
+        props: dict[str, str] = {}
+        for line in out.splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                props[k.strip()] = v.strip()
+        if props.get("ActiveState") != "active":
+            continue
+        raw_next = props.get("NextElapseUSecRealtime", "")
+        if raw_next.startswith("@"):
+            try:
+                target_ts = int(raw_next[1:])
+                return max(0, round(target_ts - ts_now))
+            except ValueError:
+                pass
+    return None
+
+
 def collect_status(paths: SysfsPaths = SysfsPaths()) -> dict[str, Any]:
     bat_cap = _read_int(paths.bat_dir / "capacity")
     bat_status = _read_str(paths.bat_dir / "status", "Unknown")
@@ -518,11 +581,14 @@ def collect_status(paths: SysfsPaths = SysfsPaths()) -> dict[str, Any]:
     bat_p_uw = _read_int(paths.bat_dir / "power_now")
     if bat_p_uw is None:
         bat_p_uw = abs(bat_v_uv * bat_i_ua) // 1_000_000
+    else:
+        bat_p_uw = abs(bat_p_uw)
     bat_temp_deci = _read_int(paths.bat_dir / "temp")
     start_thr = _read_int(paths.bat_dir / "charge_control_start_threshold")
     end_thr = _read_int(paths.bat_dir / "charge_control_end_threshold")
     cycles = _read_int(paths.bat_dir / "cycle_count")
     soh = _read_int(paths.bat_dir / "state_of_health")
+    restore_rem_s = get_charge_restore_remaining_s(paths)
 
     usb_online = _read_int(paths.usb_dir / "online", 0) == 1
     usb_v_uv = _read_int(paths.usb_dir / "voltage_now", 0) or 0
@@ -604,6 +670,7 @@ def collect_status(paths: SysfsPaths = SysfsPaths()) -> dict[str, Any]:
             "state_of_health_pct": soh,
             "vooc_enabled": vooc_enabled,
             "vooc_cool_down": vooc_cool,
+            "restore_timer_remaining_s": restore_rem_s,
         },
         "usb": {
             "online": usb_online,
@@ -673,11 +740,15 @@ def format_status(data: dict[str, Any]) -> str:
     )
     cfg_hz = d.get("configured_refresh_hz")
     hz_note = f"{d['refresh_hz']} Hz" + (f" (下次启动 {cfg_hz} Hz)" if cfg_hz and cfg_hz != d["refresh_hz"] else "")
+    rem_s = b.get("restore_timer_remaining_s")
+    rem_note = f" (剩 {format_duration_short(rem_s)} 恢复 80%)" if rem_s else ""
+    pwr_verb = "放电" if b.get("status") == "Discharging" and (b.get("power_w") or 0) >= 0.1 else "功率"
     lines = [
         "=== OnePlus 11 (salami) 硬件与运行状态 ===",
         (
-            f"电池与快充 : {b['capacity_pct']}% ({b['status']}) | 功率 {b['power_w']:.2f} W "
-            f"({b['voltage_v']:.2f} V) | 电池温度 {b['temp_c']} °C | 限充 {b['start_threshold_pct']}–{b['end_threshold_pct']}%"
+            f"电池与快充 : {b['capacity_pct']}% ({b['status']}) | {pwr_verb} {b['power_w']:.2f} W "
+            f"({b['voltage_v']:.2f} V) | 电池温度 {b['temp_c']} °C | "
+            f"限充 {b['start_threshold_pct']}–{b['end_threshold_pct']}%{rem_note}"
         ),
         (
             f"USB 与协议 : {usb_str} | SUPERVOOC 默认={vooc_str} | "
@@ -708,7 +779,37 @@ def _run_cmd(argv: list[str]) -> str:
         return ""
 
 
-def discover_managed_services(paths: SysfsPaths = SysfsPaths()) -> list[tuple[str, str, str]]:
+def _query_systemd_units(units: list[str]) -> dict[str, dict[str, str]]:
+    """Fetch UnitFileState and ActiveState for many systemd units in a single subprocess call."""
+    if not units:
+        return {}
+    raw = _run_cmd(
+        ["systemctl", "show", "--property=Id,UnitFileState,ActiveState", "--", *units]
+    )
+    info: dict[str, dict[str, str]] = {}
+    if not raw:
+        return info
+    cur: dict[str, str] = {}
+    for line in raw.splitlines():
+        if not line.strip():
+            unit_id = cur.get("Id")
+            if unit_id:
+                info[unit_id] = cur
+            cur = {}
+            continue
+        if "=" in line:
+            k, v = line.split("=", 1)
+            cur[k.strip()] = v.strip()
+    if cur.get("Id"):
+        info[cur["Id"]] = cur
+    return info
+
+
+def discover_managed_services(
+    paths: SysfsPaths = SysfsPaths(),
+    *,
+    unit_states: dict[str, dict[str, str]] | None = None,
+) -> list[tuple[str, str, str]]:
     """Return enabled optional server units plus operator-defined entries from /etc/salami/services.conf."""
     entries: list[tuple[str, str, str]] = []
     seen: set[str] = set()
@@ -721,11 +822,15 @@ def discover_managed_services(paths: SysfsPaths = SysfsPaths()) -> list[tuple[st
             if len(parts) == 3 and _UNIT_NAME_RE.fullmatch(parts[0]) and parts[2] in ("restart", "reload"):
                 entries.append((parts[0], parts[1], parts[2]))
                 seen.add(parts[0])
+    optional_units = [u for u, _lbl, _act in OPTIONAL_SERVER_UNITS if u not in seen]
+    states = unit_states if unit_states is not None else _query_systemd_units(optional_units)
     for unit, label, action in OPTIONAL_SERVER_UNITS:
         if unit in seen:
             continue
-        enabled = _run_cmd(["systemctl", "is-enabled", unit])
-        if enabled in ("enabled", "enabled-runtime") or _run_cmd(["systemctl", "is-active", unit]) == "active":
+        st = states.get(unit) or {}
+        uf_state = st.get("UnitFileState", "")
+        act_state = st.get("ActiveState", "")
+        if uf_state in ("enabled", "enabled-runtime") or act_state == "active":
             entries.append((unit, label, action))
             seen.add(unit)
     return entries
@@ -922,13 +1027,18 @@ def format_security_status(sec: dict[str, Any]) -> str:
     pkg_part = f" (模块包 v{sec['kernel_pkg_version']})" if sec.get("kernel_pkg_version") else ""
     cpu_ok = len(sec["cpu_vulnerabilities"]) - len(sec["cpu_unmitigated"])
     cpu_total = len(sec["cpu_vulnerabilities"])
+    unmitigated = sec["cpu_unmitigated"]
+    if unmitigated:
+        cpu_note = f" ({len(unmitigated)} 项未缓解: {', '.join(unmitigated)})"
+    else:
+        cpu_note = " (Spectre v1/v2 CSV2+BHB / SSB 均已缓解，0 项未防护)"
     fw_str = "运行中 (active)" if sec["nftables_active"] else "未启用"
     failed_keys = [k for k, v in sec["sysctls"].items() if not v["ok"]]
     fail_note = f" (未达标: {', '.join(failed_keys)})" if failed_keys else " (全部就绪)"
     lines = [
         "=== 内核 CVE 免疫与系统安全加固状态 ===",
         f"当前内核 : {sec['kernel_release']}{pkg_part} | 防火墙 nftables: {fw_str}",
-        f"CPU 硬件免疫 : {cpu_ok}/{cpu_total} 项受保护 (Spectre v1/v2 CSV2+BHB / SSB 均已缓解，0 项裸奔)",
+        f"CPU 硬件免疫 : {cpu_ok}/{cpu_total} 项受保护{cpu_note}",
         f"内核加固参数 : {sec['sysctl_ok']}/{sec['sysctl_total']} 项生效{fail_note}",
     ]
     return "\n".join(lines)
@@ -943,14 +1053,30 @@ def collect_net_and_services(paths: SysfsPaths = SysfsPaths()) -> dict[str, Any]
     )
     nm_conn = _run_cmd(["nmcli", "networking", "connectivity"]) or "unknown"
     modem = collect_modem_status()
-    managed = discover_managed_services(paths)
+
+    # Batch query all base, optional, and custom units in a single systemctl call.
+    candidate_units: list[str] = list(BASE_HEALTH_UNITS)
+    for u, _lbl, _act in OPTIONAL_SERVER_UNITS:
+        if u not in candidate_units:
+            candidate_units.append(u)
+    if paths.services_conf.is_file():
+        for raw_line in _read_str(paths.services_conf).splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) == 3 and _UNIT_NAME_RE.fullmatch(parts[0]) and parts[0] not in candidate_units:
+                candidate_units.append(parts[0])
+    unit_states = _query_systemd_units(candidate_units)
+
+    managed = discover_managed_services(paths, unit_states=unit_states)
     units_to_check = list(BASE_HEALTH_UNITS)
     for unit, _label, _act in managed:
         if unit not in units_to_check:
             units_to_check.append(unit)
     services: dict[str, str] = {}
     for unit in units_to_check:
-        state = _run_cmd(["systemctl", "is-active", unit]) or "inactive"
+        state = (unit_states.get(unit) or {}).get("ActiveState") or "inactive"
         services[unit.removesuffix(".service")] = state
     return {
         "connectivity": nm_conn,
@@ -1115,6 +1241,393 @@ def trigger_vibrate(duration_ms: int = 60, paths: SysfsPaths = SysfsPaths()) -> 
         os.close(fd)
 
 
+def _disk_usage_pct(mount_path: Path) -> tuple[float, float, float] | None:
+    if not mount_path.exists():
+        return None
+    try:
+        du = shutil.disk_usage(mount_path)
+    except OSError:
+        return None
+    if du.total <= 0:
+        return None
+    used_pct = round(du.used * 100.0 / du.total, 1)
+    free_gib = round(du.free / (1024**3), 1)
+    total_gib = round(du.total / (1024**3), 1)
+    return used_pct, free_gib, total_gib
+
+
+def collect_doctor_report(
+    paths: SysfsPaths = SysfsPaths(),
+    *,
+    live_override: bool | None = None,
+) -> dict[str, Any]:
+    """Run read-only full-stack diagnostics across kernel, power, thermal, display, video, I/O, net, and security."""
+    live = (paths.bat_dir == SysfsPaths.bat_dir) if live_override is None else live_override
+    status = collect_status(paths)
+    sec = collect_security_status(paths)
+    checks: list[dict[str, str]] = []
+
+    def add(cid: str, name: str, level: str, detail: str, hint: str = "") -> None:
+        checks.append({"id": cid, "name": name, "status": level, "detail": detail, "hint": hint})
+
+    # 1. Boot & systemd units
+    krel = sec["kernel_release"]
+    if live:
+        failed_raw = _run_cmd(["systemctl", "--failed", "--no-legend", "--plain"])
+        failed_units = [line.split()[0] for line in failed_raw.splitlines() if line.strip()]
+        if failed_units:
+            add(
+                "boot_systemd",
+                "内核与系统服务",
+                "FAIL",
+                f"内核 {krel}，存在 {len(failed_units)} 个失败单元: {', '.join(failed_units[:4])}",
+                "执行 `systemctl --failed` 与 `journalctl -u <unit>` 排查失败原因",
+            )
+        else:
+            add("boot_systemd", "内核与系统服务", "PASS", f"内核 {krel}，0 个失败 systemd 单元")
+    else:
+        add("boot_systemd", "内核与系统服务", "PASS", f"内核 {krel} (离线检查模式)")
+
+    # 2. Battery & charging safety
+    bat = status["battery"]
+    b_cap = bat["capacity_pct"]
+    b_temp = bat["temp_c"]
+    b_start = bat["start_threshold_pct"]
+    b_end = bat["end_threshold_pct"]
+    if b_cap is None:
+        add("battery", "电池与快充", "FAIL", "未读取到 qcom-battmgr-bat 电池节点", "检查 qcom_battmgr 模块与 ADSP 固件加载")
+    elif b_start is not None and b_end is not None and b_start > b_end:
+        add(
+            "battery",
+            "电池与快充",
+            "FAIL",
+            f"限充区间异常 start={b_start}% > end={b_end}%",
+            "执行 `salami-ctl charge 80` 重置合法限充区间",
+        )
+    elif b_temp is not None and b_temp >= 52.0:
+        add(
+            "battery",
+            "电池与快充",
+            "FAIL",
+            f"电池过热 {b_temp} °C (电量 {b_cap}%)",
+            "立即停止高负载或执行 `salami-ctl vooc off` 切回 10W 慢充降温",
+        )
+    elif b_temp is not None and b_temp >= 45.0:
+        add(
+            "battery",
+            "电池与快充",
+            "WARN",
+            f"电池温度偏高 {b_temp} °C (电量 {b_cap}%，限充 {b_start}–{b_end}%)",
+            "建议切换 `salami-ctl vooc off` 或降低负载",
+        )
+    else:
+        vooc_txt = "SUPERVOOC 开启" if bat["vooc_enabled"] else "10W 慢充"
+        add(
+            "battery",
+            "电池与快充",
+            "PASS",
+            f"电量 {b_cap}% ({bat['status']})，电池 {b_temp} °C，限充 {b_start}–{b_end}%，{vooc_txt}",
+        )
+
+    # 3. Thermals
+    th = status["thermals_c"]
+    cpu_t = th.get("cpu_max")
+    gpu_t = th.get("gpu_max")
+    skin_t = th.get("skin")
+    if (cpu_t is not None and cpu_t >= 90.0) or (skin_t is not None and skin_t >= 52.0):
+        add(
+            "thermals",
+            "SoC 与机身温控",
+            "FAIL",
+            f"高温告警 CPU={cpu_t}°C, GPU={gpu_t}°C, 机身={skin_t}°C",
+            "建议切至 `salami-ctl perf eco` 并检查散热",
+        )
+    elif (cpu_t is not None and cpu_t >= 75.0) or (gpu_t is not None and gpu_t >= 75.0) or (skin_t is not None and skin_t >= 45.0):
+        add(
+            "thermals",
+            "SoC 与机身温控",
+            "WARN",
+            f"温度偏高 CPU={cpu_t}°C, GPU={gpu_t}°C, 机身={skin_t}°C",
+            "持续满载时可切至 `salami-ctl perf balanced` 或 `eco`",
+        )
+    else:
+        add("thermals", "SoC 与机身温控", "PASS", f"CPU {cpu_t}°C · GPU {gpu_t}°C · 机身 {skin_t}°C")
+
+    # 4. Display & Touch sync
+    ref = get_refresh_status(paths)
+    touch = status["touch"]
+    dpms = status["display"]["dpms"]
+    p_hz = ref["active_panel_hz"]
+    t_hz = ref["active_touch_hz"]
+    if p_hz is not None and t_hz is not None and p_hz != t_hz:
+        add(
+            "display_touch",
+            "显示与触控同步",
+            "WARN",
+            f"面板 ({p_hz} Hz) 与触控 ({t_hz} Hz) 刷新率不一致",
+            f"执行 `salami-ctl refresh {p_hz}` 同步双端刷新率",
+        )
+    elif dpms.lower() == "on" and touch.get("power_mode_supported") and touch.get("power_mode") != "active":
+        add(
+            "display_touch",
+            "显示与触控同步",
+            "WARN",
+            f"屏幕已亮起 (DSI {dpms}) 但触控仍处于 {touch['power_mode']} 状态",
+            "执行 `salami-ctl touch mode active` 恢复触控",
+        )
+    else:
+        add(
+            "display_touch",
+            "显示与触控同步",
+            "PASS",
+            f"DSI {dpms} @ {p_hz or status['display']['refresh_hz']} Hz，触控 {touch['power_mode']} (息屏策略 {touch['off_policy']})",
+        )
+
+    # 5. GPU & Iris3 Hardware Video
+    has_render = (paths.dri_dir / "renderD128").exists()
+    has_iris_dec = (paths.dev_dir / "video0").exists()
+    has_iris_enc = (paths.dev_dir / "video1").exists()
+    has_va = (paths.va_driver_dir / "qcom_drv_video.so").exists() or (paths.va_driver_dir / "msm_drv_video.so").exists()
+    if has_render and has_iris_dec and has_iris_enc and has_va:
+        add("gpu_video", "GPU 与 Iris3 视频硬解", "PASS", "renderD128 + Iris3 (/dev/video0, video1) + VA-API 驱动就绪")
+    elif has_render:
+        missing = [
+            lbl
+            for ok_flag, lbl in (
+                (has_iris_dec, "/dev/video0"),
+                (has_iris_enc, "/dev/video1"),
+                (has_va, "qcom_drv_video.so"),
+            )
+            if not ok_flag
+        ]
+        add(
+            "gpu_video",
+            "GPU 与 Iris3 视频硬解",
+            "WARN",
+            f"GPU 渲染节点可用，但缺少 Iris3 组件: {', '.join(missing)}",
+            "确认已安装 qcom-va-driver 与导入 vendor_a Iris3 固件",
+        )
+    else:
+        add(
+            "gpu_video",
+            "GPU 与 Iris3 视频硬解",
+            "FAIL",
+            "未检测到 /dev/dri/renderD128 硬件渲染节点",
+            "检查 msm/adreno 驱动及 `salami-import-gpu-firmware.service`",
+        )
+
+    # 6. Storage (UFS 4.0 + Disk space) & ZRAM
+    ufs_sched = status["storage"]["ufs_scheduler"]
+    zram = status["memory"].get("zram") or {}
+    root_du = _disk_usage_pct(paths.root_mount)
+    home_du = _disk_usage_pct(paths.home_mount) if paths.home_mount != paths.root_mount else None
+    disk_warns: list[str] = []
+    disk_fails: list[str] = []
+    disk_parts: list[str] = []
+    for label, du in (("/", root_du), ("/home", home_du)):
+        if du is None:
+            continue
+        pct, free_g, tot_g = du
+        disk_parts.append(f"{label} {pct}% (余 {free_g}/{tot_g}G)")
+        if pct >= 95.0:
+            disk_fails.append(f"{label} 已用 {pct}%")
+        elif pct >= 85.0:
+            disk_warns.append(f"{label} 已用 {pct}%")
+    if disk_fails:
+        add(
+            "storage_memory",
+            "UFS 存储与 ZRAM 内存",
+            "FAIL",
+            f"磁盘空间告急: {', '.join(disk_fails)}",
+            "清理大文件、日志 (`journalctl --vacuum-size=256M`) 或 apt 缓存",
+        )
+    elif disk_warns or ufs_sched != "none" or not zram:
+        reasons = list(disk_warns)
+        if ufs_sched != "none":
+            reasons.append(f"UFS 调度器={ufs_sched}")
+        if not zram:
+            reasons.append("ZRAM 未启用")
+        add(
+            "storage_memory",
+            "UFS 存储与 ZRAM 内存",
+            "WARN",
+            f"{' · '.join(reasons)} ({'，'.join(disk_parts)})",
+            "运行 `systemctl start salami-ufs-tune.service` 或检查 zram0",
+        )
+    else:
+        z_txt = f"ZRAM {zram.get('ratio', 1.0)}x"
+        add("storage_memory", "UFS 存储与 ZRAM 内存", "PASS", f"UFS [{ufs_sched}] · {z_txt} · {'，'.join(disk_parts)}")
+
+    # 7. Network & 5G Modem
+    tcp_cc = status["network"]["tcp_congestion_control"]
+    qdisc = status["network"]["default_qdisc"]
+    has_regdb = paths.regdb_file.exists()
+    net_issues: list[str] = []
+    if tcp_cc != "bbr" or qdisc != "fq":
+        net_issues.append(f"TCP={tcp_cc}+{qdisc}")
+    if not has_regdb:
+        net_issues.append("缺少 regulatory.db")
+    if live:
+        net_info = collect_net_and_services(paths)
+        if net_info["wifi_wlp1s0"] and net_info["wifi_power_save"] not in ("off", "unknown"):
+            net_issues.append(f"Wi-Fi power_save={net_info['wifi_power_save']}")
+        mdm = net_info["modem"]
+        if mdm.get("present") and mdm.get("sim_present") and mdm.get("power_state") == "on" and mdm.get("state") in ("searching", "registered") and not mdm.get("ip"):
+            net_issues.append(f"5G 基带未分配 IP ({mdm['state']})")
+    if net_issues:
+        add(
+            "network_modem",
+            "网络栈与 5G 蜂窝",
+            "WARN",
+            "；".join(net_issues),
+            "执行 `salami-ctl net` 或 `salami-ctl modem recover` 检查链路",
+        )
+    else:
+        add("network_modem", "网络栈与 5G 蜂窝", "PASS", f"TCP {tcp_cc} + {qdisc}，wireless-regdb 就绪")
+
+    # 8. Security & Firewall
+    unmit = sec["cpu_unmitigated"]
+    sys_ok = sec["sysctl_ok"]
+    sys_tot = sec["sysctl_total"]
+    nft_ok = sec["nftables_active"]
+    if unmit or not nft_ok:
+        reasons = []
+        if unmit:
+            reasons.append(f"CPU 未缓解项: {', '.join(unmit)}")
+        if not nft_ok:
+            reasons.append("nftables 防火墙未运行")
+        add(
+            "security",
+            "安全加固与防火墙",
+            "FAIL",
+            "；".join(reasons),
+            "执行 `salami-ctl security` 并检查 `nftables.service`",
+        )
+    elif sys_tot > 0 and sys_ok < sys_tot:
+        add(
+            "security",
+            "安全加固与防火墙",
+            "WARN",
+            f"内核加固参数 {sys_ok}/{sys_tot} 生效，nftables 运行中",
+            "执行 `sudo sysctl --system` 重新加载 60-salami-security.conf",
+        )
+    else:
+        add(
+            "security",
+            "安全加固与防火墙",
+            "PASS",
+            f"CPU {len(sec['cpu_vulnerabilities'])} 项受保护 · sysctl {sys_ok}/{sys_tot} · nftables 运行中",
+        )
+
+    counts = {
+        "pass": sum(1 for c in checks if c["status"] == "PASS"),
+        "warn": sum(1 for c in checks if c["status"] == "WARN"),
+        "fail": sum(1 for c in checks if c["status"] == "FAIL"),
+    }
+    overall = "FAIL" if counts["fail"] > 0 else ("WARN" if counts["warn"] > 0 else "PASS")
+    return {"overall": overall, "counts": counts, "checks": checks}
+
+
+def format_doctor_report(report: dict[str, Any]) -> str:
+    cnt = report["counts"]
+    lines = [
+        f"=== OnePlus 11 (salami) 一键系统体检 [{report['overall']}] "
+        f"(通过 {cnt['pass']} / 告警 {cnt['warn']} / 异常 {cnt['fail']}) ===",
+    ]
+    for item in report["checks"]:
+        tag = f"[{item['status']:4s}]"
+        lines.append(f"{tag} {item['name']}: {item['detail']}")
+        if item["hint"]:
+            lines.append(f"       -> 建议: {item['hint']}")
+    return "\n".join(lines)
+
+
+def render_watch_frame(
+    status: dict[str, Any],
+    peaks: dict[str, float],
+    interval_s: float,
+    elapsed_s: float,
+) -> str:
+    """Render one frame of the live terminal telemetry dashboard and update session peaks."""
+    b = status["battery"]
+    u = status["usb"]
+    p = status["perf"]
+    t = status["thermals_c"]
+    d = status["display"]
+    m = status["memory"]
+    st = status["storage"]
+    n = status["network"]
+
+    pw = float(b.get("power_w") or 0.0)
+    peaks["power_w"] = max(peaks.get("power_w", 0.0), pw)
+    for k, val in (("cpu_max", t.get("cpu_max")), ("gpu_max", t.get("gpu_max")), ("skin", t.get("skin"))):
+        if val is not None:
+            peaks[k] = max(peaks.get(k, -999.0), float(val))
+
+    clusters = p.get("clusters") or {}
+    cpu_parts = []
+    for cname, label in (("policy0", "A510"), ("policy3", "A715"), ("policy7", "X3")):
+        cinfo = clusters.get(cname)
+        if not cinfo:
+            continue
+        cur_s = f"{cinfo['cur_mhz']}/" if "cur_mhz" in cinfo else ""
+        cpu_parts.append(f"{label} {cur_s}{cinfo['max_mhz']}MHz")
+    gpu = p.get("gpu") or {}
+    gpu_cur_s = f"{gpu['cur_mhz']}/" if "cur_mhz" in gpu else ""
+    gpu_line = f"Adreno 740 {gpu_cur_s}{gpu.get('min_mhz', '?')}–{gpu.get('max_mhz', '?')}MHz" if gpu else "Adreno 740 -"
+
+    rem_s = b.get("restore_timer_remaining_s")
+    rem_note = f" | 倒计时 {format_duration_short(rem_s)}" if rem_s else ""
+    pwr_verb = "放电" if b.get("status") == "Discharging" and pw >= 0.1 else "功率"
+    zram = m.get("zram") or {}
+    zram_s = f"{zram.get('compr_mib', 0)} MiB ({zram.get('ratio', 1.0)}x)" if zram else "未启用"
+    usb_s = f"{u['voltage_v']:.2f}V / {u['current_a']:.2f}A" if u["online"] else "未接入"
+
+    lines = [
+        f"=== OnePlus 11 实时遥测看板 (每 {interval_s:g}s 刷新 · 已运行 {int(elapsed_s)}s · Ctrl+C 退出) ===",
+        f"电池供电 : {b['capacity_pct']}% ({b['status']}) | {pwr_verb} {pw:.2f} W (峰值 {peaks['power_w']:.2f} W) | "
+        f"{b['voltage_v']:.3f} V / {b['current_a']:.2f} A",
+        f"快充限充 : USB {usb_s} | 限充 {b['start_threshold_pct']}–{b['end_threshold_pct']}%{rem_note} | "
+        f"SUPERVOOC={'开' if b['vooc_enabled'] else '关'} (cool={b['vooc_cool_down']})",
+        f"性能档位 : {p['label']} | Boost={'开' if p['boost'] else '关'}",
+        f"实时频率 : {' | '.join(cpu_parts) or '-'} | {gpu_line}",
+        f"温度峰值 : CPU {t['cpu_max']}°C (峰 {peaks.get('cpu_max', 0):.1f}°C) | "
+        f"GPU {t['gpu_max']}°C (峰 {peaks.get('gpu_max', 0):.1f}°C) | "
+        f"机身 {t['skin']}°C (峰 {peaks.get('skin', 0):.1f}°C) | 电池 {b['temp_c']}°C",
+        f"屏幕内存 : DSI {d['dpms']} @ {d['refresh_hz']}Hz 亮度 {d['brightness_pct']}% | "
+        f"RAM {m['ram_used_gib']}/{m['ram_total_gib']}G | ZRAM {zram_s} | "
+        f"UFS [{st['ufs_scheduler']}] | {n['tcp_congestion_control']}+{n['default_qdisc']}",
+    ]
+    return "\n".join(lines)
+
+
+def run_watch(
+    interval_s: float = 1.0,
+    *,
+    count: int | None = None,
+    paths: SysfsPaths = SysfsPaths(),
+) -> int:
+    if interval_s < 0.2 or interval_s > 60.0:
+        raise ValueError("刷新间隔 --interval 须在 0.2..60 秒之间")
+    peaks: dict[str, float] = {}
+    start_ts = time.monotonic()
+    is_tty = sys.stdout.isatty()
+    shown = 0
+    try:
+        while True:
+            frame = render_watch_frame(collect_status(paths), peaks, interval_s, time.monotonic() - start_ts)
+            if is_tty:
+                sys.stdout.write("\033[2J\033[H")
+            sys.stdout.write(frame + "\n")
+            sys.stdout.flush()
+            shown += 1
+            if count is not None and shown >= count:
+                return 0
+            select.select([], [], [], interval_s)
+    except KeyboardInterrupt:
+        return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="salami-ctl",
@@ -1125,6 +1638,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("status", help="显示电池/快充/性能/温度/显示/存储/网络综合面板")
     p_status.add_argument("--json", action="store_true", help="输出结构化 JSON")
 
+    p_watch = sub.add_parser("watch", help="实时刷新的终端遥测看板（追踪峰值功率、温度与实时频率）")
+    p_watch.add_argument("-n", "--interval", type=float, default=1.0, help="刷新间隔秒数 (0.2..60，默认 1.0)")
+    p_watch.add_argument("--count", type=int, default=None, help="仅输出指定帧数后退出（适合脚本采样）")
+
+    p_doc = sub.add_parser("doctor", help="一键全栈健康体检（内核、电池、温控、显示触控、Iris3、存储、网络、安全）")
+    p_doc.add_argument("--json", action="store_true", help="输出结构化 JSON")
+
     p_perf = sub.add_parser("perf", help="查询或切换骁龙 8 Gen 2 (CPU + Adreno 740 GPU) 三档性能模式")
     p_perf.add_argument("mode", nargs="?", default="status", help="status | eco | balanced | performance")
 
@@ -1133,6 +1653,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ref = sub.add_parser("refresh", help="查询或原子同步设置面板与触控刷新率 (60/90/120 Hz)")
     p_ref.add_argument("hz", nargs="?", default="status", help="status | 60 | 90 | 120")
+    p_ref.add_argument("--no-persist", action="store_true", help="仅实时生效，不写入 /etc/modprobe.d（免提权）")
 
     p_rdp = sub.add_parser("rdp", help="查询或设置远程桌面 Iris3 硬件编码画质/码率预设")
     p_rdp.add_argument("preset", nargs="?", default="status", help="status | hq (18) | balanced (22) | fast (27) | 1..51")
@@ -1170,8 +1691,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_sec = sub.add_parser("security", help="巡检内核 CVE 缓解、CPU 漏洞免疫、sysctl 加固与防火墙状态")
     p_sec.add_argument("--json", action="store_true", help="输出结构化 JSON")
 
-    p_svc = sub.add_parser("service", help="重启或重载已托管的系统服务")
+    p_svc = sub.add_parser("service", help="启动、停止、重启或重载已托管的系统服务")
     p_svc.add_argument("unit", help="systemd 服务单元名（如 ssh.service）")
+    p_svc.add_argument("action", nargs="?", default=None, help="可选动作: start | stop | restart | reload（默认按服务配置）")
 
     sub.add_parser("fstrim", help="执行 UFS 4.0 全盘闪存 TRIM 优化")
 
@@ -1216,16 +1738,28 @@ def main(argv: list[str] | None = None, paths: SysfsPaths = SysfsPaths()) -> int
                 print(format_status(data))
             return 0
 
+        if cmd == "watch":
+            return run_watch(args.interval, count=args.count, paths=paths)
+
+        if cmd == "doctor":
+            report = collect_doctor_report(paths)
+            if getattr(args, "json", False):
+                print(json.dumps(report, ensure_ascii=False, indent=2))
+            else:
+                print(format_doctor_report(report))
+            return 1 if report["counts"]["fail"] > 0 else 0
+
         if cmd == "perf":
             info = detect_perf_profile(paths) if args.mode == "status" else set_perf_profile(args.mode, paths)
             details = ", ".join(
-                f"{k}:{v['governor']}≤{v['max_mhz']}MHz" for k, v in info["clusters"].items()
+                f"{k}:{v['governor']} " + (f"{v['cur_mhz']}/" if "cur_mhz" in v else "") + f"≤{v['max_mhz']}MHz"
+                for k, v in info["clusters"].items()
             )
-            gpu_str = (
-                f", GPU:{info['gpu']['min_mhz']}–{info['gpu']['max_mhz']}MHz"
-                if info.get("gpu")
-                else ""
-            )
+            gpu_str = ""
+            if info.get("gpu"):
+                g = info["gpu"]
+                gcur = f"{g['cur_mhz']}/" if "cur_mhz" in g else ""
+                gpu_str = f", GPU:{gcur}{g['min_mhz']}–{g['max_mhz']}MHz"
             print(f"性能模式: {info['label']} ({details}{gpu_str})")
             return 0
 
@@ -1250,15 +1784,20 @@ def main(argv: list[str] | None = None, paths: SysfsPaths = SysfsPaths()) -> int
             hz = int(args.hz.lower().rstrip("hz"))
             if hz not in VALID_REFRESH_HZ:
                 raise ValueError("刷新率仅支持 60 | 90 | 120 Hz")
-            if os.geteuid() != 0 and paths.refresh_modprobe_conf == SysfsPaths.refresh_modprobe_conf:
+            persist = not getattr(args, "no_persist", False)
+            if persist and os.geteuid() != 0 and paths.refresh_modprobe_conf == SysfsPaths.refresh_modprobe_conf:
                 return _reexec_with_sudo(["refresh", str(hz)])
-            st = set_refresh_rate(hz, paths)
+            st = set_refresh_rate(hz, paths, persist=persist)
             live_note = (
                 "面板与触控已实时切换"
                 if st["runtime_panel_applied"] and st["runtime_touch_applied"]
                 else ("触控已实时切换，面板将在下次重启或亮屏切换生效" if st["runtime_touch_applied"] else "将在下次重启模块加载生效")
             )
-            print(f"刷新率已同步设为 {hz} Hz（{live_note}，当前运行面板={st['active_panel_hz']}Hz/触控={st['active_touch_hz']}Hz）")
+            persist_note = "" if st.get("persisted") else "，未持久化"
+            print(
+                f"刷新率已同步设为 {hz} Hz（{live_note}{persist_note}，"
+                f"当前运行面板={st['active_panel_hz']}Hz/触控={st['active_touch_hz']}Hz）"
+            )
             return 0
 
         if cmd == "hbm":
@@ -1351,11 +1890,15 @@ def main(argv: list[str] | None = None, paths: SysfsPaths = SysfsPaths()) -> int
             unit = args.unit if args.unit.endswith(".service") else f"{args.unit}.service"
             if unit not in allowed:
                 raise ValueError(f"未授权或未启用的服务单元: {unit}")
-            if os.geteuid() != 0:
-                return _reexec_with_sudo(["service", unit])
-            lbl, act = allowed[unit]
-            subprocess.run(["/usr/bin/systemctl", act, unit], check=True)
-            print(f"{lbl} 已完成{'重载' if act == 'reload' else '重启'}")
+            lbl, default_act = allowed[unit]
+            req_act = args.action.lower() if args.action else default_act
+            if req_act not in ("start", "stop", "restart", "reload"):
+                raise ValueError("服务动作须为 start | stop | restart | reload")
+            if os.geteuid() != 0 and paths.services_conf == SysfsPaths.services_conf:
+                return _reexec_with_sudo(["service", unit, req_act])
+            subprocess.run(["/usr/bin/systemctl", req_act, unit], check=True)
+            verb_zh = {"start": "启动", "stop": "停止", "restart": "重启", "reload": "重载"}[req_act]
+            print(f"{lbl} 已完成{verb_zh}")
             return 0
 
         if cmd == "fstrim":
@@ -1385,9 +1928,11 @@ def main(argv: list[str] | None = None, paths: SysfsPaths = SysfsPaths()) -> int
         if cmd == "charge":
             if args.target == "status":
                 b = collect_status(paths)["battery"]
+                rem = format_duration_short(b.get("restore_timer_remaining_s"))
+                rem_part = f"，{rem} 后恢复 80%" if rem else ""
                 print(
                     f"当前电量 {b['capacity_pct']}% ({b['status']})，限充区间 "
-                    f"{b['start_threshold_pct']}–{b['end_threshold_pct']}%，实时功率 {b['power_w']:.2f} W"
+                    f"{b['start_threshold_pct']}–{b['end_threshold_pct']}%{rem_part}，实时功率 {b['power_w']:.2f} W"
                 )
                 return 0
             limit = int(args.target.rstrip("%"))

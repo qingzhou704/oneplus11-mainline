@@ -15,6 +15,30 @@ const PERF_MODES = [
     {id: 'performance', label: '满血性能 (3.19 GHz 睿频)', short: '满血性能'},
 ];
 
+function formatDurationShort(seconds) {
+    if (!seconds || seconds <= 0)
+        return '';
+    if (seconds < 60)
+        return '<1m';
+    const mins = Math.floor((seconds + 30) / 60);
+    const hours = Math.floor(mins / 60);
+    const remMins = mins % 60;
+    if (hours > 0)
+        return remMins ? `${hours}h${String(remMins).padStart(2, '0')}m` : `${hours}h`;
+    return `${remMins}m`;
+}
+
+function formatPowerDesc(watts, status) {
+    const absW = Math.abs(Number(watts ?? 0));
+    if (absW < 0.1)
+        return '稳压 0 W';
+    if (status === 'Discharging')
+        return `放电 ${absW.toFixed(1)} W`;
+    if (status === 'Charging')
+        return `充电 ${absW.toFixed(1)} W`;
+    return `${absW.toFixed(1)} W`;
+}
+
 function runCtlAsync(args, onDone = null) {
     try {
         const proc = Gio.Subprocess.new(
@@ -44,6 +68,9 @@ class SalamiTopBarButton extends PanelMenu.Button {
         this._netData = null;
         this._timedChargeTag = null;
         this._hideFlyoutTimerId = 0;
+        this._positionFlyoutIdleId = 0;
+        this._activeFlyoutKey = null;
+        this._activeRowActor = null;
 
         const panelBox = new St.BoxLayout({style_class: 'panel-status-menu-box salami-panel-box'});
         this._panelIcon = new St.Icon({
@@ -219,7 +246,10 @@ class SalamiTopBarButton extends PanelMenu.Button {
             });
             row.connect('button-press-event', () => {
                 this._cancelHideFlyout();
-                this._openCategoryFlyout(key, row);
+                if (this._activeFlyoutKey === key && this._flyoutCard?.visible && !row.hover)
+                    this._hideFlyoutImmediate();
+                else
+                    this._openCategoryFlyout(key, row);
                 return Clutter.EVENT_STOP;
             });
 
@@ -242,6 +272,13 @@ class SalamiTopBarButton extends PanelMenu.Button {
         }
     }
 
+    _cancelPositionFlyout() {
+        if (this._positionFlyoutIdleId) {
+            GLib.source_remove(this._positionFlyoutIdleId);
+            this._positionFlyoutIdleId = 0;
+        }
+    }
+
     _scheduleHideFlyout() {
         this._cancelHideFlyout();
         this._hideFlyoutTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 180, () => {
@@ -255,12 +292,26 @@ class SalamiTopBarButton extends PanelMenu.Button {
 
     _hideFlyoutImmediate() {
         this._cancelHideFlyout();
+        this._cancelPositionFlyout();
+        this._activeFlyoutKey = null;
+        this._activeRowActor = null;
         for (const {row} of this._catRows.values())
             row.style_class = 'salami-cat-row';
         if (this._flyoutCard) {
             this._flyoutCard.hide();
             this._flyoutCard.destroy_all_children();
         }
+    }
+
+    _runAction(args, errTitle, {refreshNet = false, okTitle = null, okFallback = ''} = {}) {
+        this.menu.close();
+        runCtlAsync(args, (ok, out, err) => {
+            if (!ok)
+                Main.notify(errTitle, err || out || '执行失败');
+            else if (okTitle)
+                Main.notify(okTitle, out || okFallback);
+            this.refreshAll(refreshNet);
+        });
     }
 
     _addSubItem(label, mark, onActivate, sensitive = true) {
@@ -303,7 +354,72 @@ class SalamiTopBarButton extends PanelMenu.Button {
         }));
     }
 
+    _addServiceRow(item, active) {
+        const container = new St.BoxLayout({
+            vertical: false,
+            style_class: 'salami-svc-row',
+        });
+
+        const verbLabel = active ? (item.verb === 'reload' ? '重载' : '重启') : '启动';
+        const mainAct = active ? item.verb : 'start';
+        const mainRow = new St.BoxLayout({
+            reactive: true,
+            track_hover: true,
+            x_expand: true,
+            style_class: 'salami-sub-row salami-svc-main',
+        });
+        mainRow.add_child(new St.Label({
+            text: active ? '•' : '',
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'salami-sub-mark',
+        }));
+        mainRow.add_child(new St.Label({
+            text: `${verbLabel} ${item.label}`,
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'salami-sub-label',
+        }));
+        mainRow.connect('button-press-event', () => {
+            this._runAction(['service', item.unit, mainAct], `${verbLabel} ${item.label} 失败`, {
+                refreshNet: true,
+                okTitle: '服务运维',
+                okFallback: `已${verbLabel} ${item.label}`,
+            });
+            return Clutter.EVENT_STOP;
+        });
+
+        const sideAct = active ? 'stop' : 'start';
+        const sideVerb = active ? '停止' : '启动';
+        const sideBtn = new St.Button({
+            reactive: true,
+            can_focus: true,
+            track_hover: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            accessible_name: `${sideVerb} ${item.label}`,
+            style_class: active
+                ? 'salami-svc-icon-btn salami-svc-stop-btn'
+                : 'salami-svc-icon-btn salami-svc-start-btn',
+            child: new St.Icon({
+                icon_name: active ? 'media-playback-stop-symbolic' : 'media-playback-start-symbolic',
+                icon_size: 14,
+            }),
+        });
+        sideBtn.connect('clicked', () => {
+            this._runAction(['service', item.unit, sideAct], `${sideVerb} ${item.label} 失败`, {
+                refreshNet: true,
+                okTitle: '服务运维',
+                okFallback: `已${sideVerb} ${item.label}`,
+            });
+        });
+
+        container.add_child(mainRow);
+        container.add_child(sideBtn);
+        this._flyoutCard.add_child(container);
+    }
+
     _openCategoryFlyout(key, rowActor) {
+        this._activeFlyoutKey = key;
+        this._activeRowActor = rowActor;
         for (const [k, {row}] of this._catRows.entries())
             row.style_class = k === key ? 'salami-cat-row salami-cat-row-active' : 'salami-cat-row';
 
@@ -315,13 +431,21 @@ class SalamiTopBarButton extends PanelMenu.Button {
             const cur = st?.perf?.mode ?? 'balanced';
             for (const entry of PERF_MODES) {
                 this._addSubItem(entry.label, cur === entry.id ? '•' : '', () => {
-                    this.menu.close();
-                    runCtlAsync(['perf', entry.id], () => this.refreshAll(false));
+                    this._runAction(['perf', entry.id], '切换性能模式失败');
                 });
             }
         } else if (key === 'power') {
             const endThr = st?.battery?.end_threshold_pct ?? 80;
-            const curTag = endThr <= 80 ? '80' : (this._timedChargeTag ?? '100_keep');
+            const remS = Number(st?.battery?.restore_timer_remaining_s ?? 0);
+            if (remS > 0)
+                this._addSubNote(`定时恢复倒计时: 剩余 ${formatDurationShort(remS)}`);
+            let curTag = '100_keep';
+            if (endThr <= 80)
+                curTag = '80';
+            else if (remS > 0)
+                curTag = this._timedChargeTag ?? (remS > 6 * 3600 ? '100_12h' : '100_6h');
+            else
+                curTag = '100_keep';
             const presets = [
                 ['80', '日常 80% 护航限充', ['charge', '80']],
                 ['100_6h', '临时充满 100% (6 小时恢复)', ['charge', '100', '--hours', '6']],
@@ -330,17 +454,23 @@ class SalamiTopBarButton extends PanelMenu.Button {
             ];
             for (const [tag, text, cmd] of presets) {
                 this._addSubItem(text, curTag === tag ? '•' : '', () => {
-                    this._timedChargeTag = tag === '80' ? null : tag;
-                    this.menu.close();
-                    runCtlAsync(cmd, () => this.refreshAll(false));
+                    this._timedChargeTag = tag === '80' || tag === '100_keep' ? null : tag;
+                    this._runAction(cmd, '更新充电上限失败');
                 });
             }
             this._addSubSep();
             const voocOn = Boolean(st?.battery?.vooc_enabled ?? true);
-            this._addSubItem('允许 SUPERVOOC 50W 闪充', voocOn ? '✓' : '', () => {
-                this.menu.close();
-                runCtlAsync(['vooc', voocOn ? 'off' : 'on'], () => this.refreshAll(false));
-            });
+            const coolLv = Number(st?.battery?.vooc_cool_down ?? 0);
+            const voocMode = !voocOn ? 'slow' : (coolLv > 0 ? 'cool' : 'fast');
+            for (const [tag, label, cmd] of [
+                ['fast', 'SUPERVOOC 50W 全速闪充', ['vooc', 'on', '--cool', '0']],
+                ['cool', 'SUPERVOOC 温和限流快充', ['vooc', 'on', '--cool', '8']],
+                ['slow', '10W 低温慢充护航', ['vooc', 'off']],
+            ]) {
+                this._addSubItem(label, voocMode === tag ? '•' : '', () => {
+                    this._runAction(cmd, '切换快充模式失败');
+                });
+            }
         } else if (key === 'display') {
             const scrOn = String(st?.display?.dpms ?? 'On').toLowerCase() === 'on';
             const hbmSup = Boolean(st?.display?.hbm_supported);
@@ -349,23 +479,20 @@ class SalamiTopBarButton extends PanelMenu.Button {
             const curPct = Number(st?.display?.brightness_pct ?? 50);
 
             this._addSubItem('手机物理屏幕亮起', scrOn ? '✓' : '', () => {
-                this.menu.close();
-                runCtlAsync(['screen', scrOn ? 'off' : 'on'], () => this.refreshAll(false));
+                this._runAction(['screen', scrOn ? 'off' : 'on'], '控制物理屏幕失败');
             });
             this._addSubItem(
                 hbmSup ? '阳光屏户外超亮激发 (HBM)' : '阳光屏超亮激发 (不可用)',
                 hbmOn ? '✓' : '',
                 () => {
-                    this.menu.close();
-                    runCtlAsync(['hbm', hbmOn ? 'off' : 'on'], () => this.refreshAll(false));
+                    this._runAction(['hbm', hbmOn ? 'off' : 'on'], '切换阳光屏 HBM 失败');
                 },
                 hbmSup
             );
             this._addSubSep();
             for (const hz of [120, 90, 60]) {
                 this._addSubItem(`屏幕刷新率 ${hz} Hz`, curHz === hz ? '•' : '', () => {
-                    this.menu.close();
-                    runCtlAsync(['refresh', String(hz)], () => this.refreshAll(false));
+                    this._runAction(['refresh', String(hz)], '切换刷新率失败');
                 });
             }
             this._addSubSep();
@@ -373,8 +500,7 @@ class SalamiTopBarButton extends PanelMenu.Button {
             const nearBr = brLevels.reduce((a, b) => (Math.abs(b - curPct) < Math.abs(a - curPct) ? b : a), 35);
             for (const pct of brLevels) {
                 this._addSubItem(`屏幕亮度 ${pct}%`, nearBr === pct ? '•' : '', () => {
-                    this.menu.close();
-                    runCtlAsync(['brightness', `${pct}%`], () => this.refreshAll(false));
+                    this._runAction(['brightness', `${pct}%`], '调节屏幕亮度失败');
                 });
             }
         } else if (key === 'touch') {
@@ -389,14 +515,12 @@ class SalamiTopBarButton extends PanelMenu.Button {
                 ['active', '息屏单点触控唤醒'],
             ]) {
                 this._addSubItem(label, offPol === pol ? '•' : '', () => {
-                    this.menu.close();
-                    runCtlAsync(['touch', 'off-policy', pol], () => this.refreshAll(false));
+                    this._runAction(['touch', 'off-policy', pol], '更新息屏触控策略失败');
                 });
             }
             this._addSubSep();
             this._addSubItem('手套 / 湿手高灵敏触控', gloveOn ? '✓' : '', () => {
-                this.menu.close();
-                runCtlAsync(['touch', 'glove', gloveOn ? 'off' : 'on'], () => this.refreshAll(false));
+                this._runAction(['touch', 'glove', gloveOn ? 'off' : 'on'], '切换手套触控失败');
             }, gloveSup);
             this._addSubSep();
             const torchPresets = [
@@ -410,14 +534,12 @@ class SalamiTopBarButton extends PanelMenu.Button {
                 : [24, 64, 180].reduce((a, b) => (Math.abs(b - torchVal) < Math.abs(a - torchVal) ? b : a), 64);
             for (const [lv, label] of torchPresets) {
                 this._addSubItem(label, activeTorch === lv ? '•' : '', () => {
-                    this.menu.close();
-                    runCtlAsync(['torch', lv === 0 ? 'off' : String(lv)], () => this.refreshAll(false));
+                    this._runAction(['torch', lv === 0 ? 'off' : String(lv)], '控制手电筒失败');
                 });
             }
             this._addSubSep();
             this._addSubItem('震动手机一下 (寻机)', '', () => {
-                this.menu.close();
-                runCtlAsync(['vibrate', '80']);
+                this._runAction(['vibrate', '80'], '触发手机震动失败');
             });
         } else if (key === 'rdp') {
             const curQp = Number(st?.rdp_vaapi_qp ?? 22);
@@ -429,10 +551,9 @@ class SalamiTopBarButton extends PanelMenu.Button {
             const nearQp = presets.reduce((a, b) => (Math.abs(b[0] - curQp) < Math.abs(a[0] - curQp) ? b : a))[0];
             for (const [qp, keyName, label] of presets) {
                 this._addSubItem(label, nearQp === qp ? '•' : '', () => {
-                    this.menu.close();
-                    runCtlAsync(['rdp', keyName], (_ok, out) => {
-                        Main.notify('一加 11 控制台', out || `远程桌面画质已设为 ${label}`);
-                        this.refreshAll(false);
+                    this._runAction(['rdp', keyName], '设置远程桌面画质失败', {
+                        okTitle: '一加 11 控制台',
+                        okFallback: `远程桌面画质已设为 ${label}`,
                     });
                 });
             }
@@ -443,39 +564,37 @@ class SalamiTopBarButton extends PanelMenu.Button {
                 const sig = mdm.signal_pct !== null && mdm.signal_pct !== undefined ? ` · ${mdm.signal_pct}%` : '';
                 this._addSubNote(`5G 基带: ${carrier} · ${mdm.state}${sig}`);
             }
-            this._addSubItem('重连自愈 5G 蜂窝基带', '', () => {
+            this._addSubItem('运行一键系统体检 (Doctor)', '', () => {
                 this.menu.close();
-                runCtlAsync(['modem', 'recover'], (_ok, out, err) => {
-                    Main.notify('一加 11 控制台', out || err || '5G 基带重连已执行');
-                    this.refreshAll(true);
+                runCtlAsync(['doctor'], (_ok, out, err) => {
+                    Main.notify('一加 11 系统体检', out || err || '体检已完成');
+                });
+            });
+            this._addSubItem('重连自愈 5G 蜂窝基带', '', () => {
+                this._runAction(['modem', 'recover'], '5G 基带重连失败', {
+                    refreshNet: true,
+                    okTitle: '一加 11 控制台',
+                    okFallback: '5G 基带重连已执行',
                 });
             });
             this._addSubItem('查看系统安全加固状态', '', () => {
-                this.menu.close();
-                runCtlAsync(['security'], (_ok, out, err) => {
-                    Main.notify('安全加固状态', out || err);
+                this._runAction(['security'], '读取安全加固状态失败', {
+                    okTitle: '安全加固状态',
                 });
             });
             this._addSubItem('执行 UFS 闪存 TRIM 优化', '', () => {
-                this.menu.close();
-                runCtlAsync(['fstrim'], (_ok, out, err) => {
-                    Main.notify('UFS 闪存优化', out || err || '已完成');
+                this._runAction(['fstrim'], 'UFS 闪存 TRIM 失败', {
+                    okTitle: 'UFS 闪存优化',
+                    okFallback: '已完成',
                 });
             });
             const actions = net?.managed_actions ?? [];
             if (actions.length > 0) {
                 this._addSubSep();
                 for (const item of actions) {
-                    const verbLabel = item.verb === 'reload' ? '重载' : '重启';
                     const svcKey = item.unit.replace(/\.service$/, '');
-                    const ok = net?.services?.[svcKey] === 'active';
-                    this._addSubItem(`${verbLabel} ${item.label}`, ok ? '•' : '', () => {
-                        this.menu.close();
-                        runCtlAsync(['service', item.unit], (_sOk, out, err) => {
-                            Main.notify('服务运维', out || err || `已${verbLabel} ${item.label}`);
-                            this.refreshAll(true);
-                        });
-                    });
+                    const active = net?.services?.[svcKey] === 'active';
+                    this._addServiceRow(item, active);
                 }
             }
         }
@@ -483,8 +602,10 @@ class SalamiTopBarButton extends PanelMenu.Button {
         this._flyoutCard.translation_y = 0;
         this._flyoutCard.show();
 
-        GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-            if (!this._flyoutCard?.visible || !this._mainCard)
+        this._cancelPositionFlyout();
+        this._positionFlyoutIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            this._positionFlyoutIdleId = 0;
+            if (!this._flyoutCard?.visible || !this._mainCard || !rowActor)
                 return GLib.SOURCE_REMOVE;
             const [, mainY] = this._mainCard.get_transformed_position();
             const [, rowY] = rowActor.get_transformed_position();
@@ -549,8 +670,10 @@ class SalamiTopBarButton extends PanelMenu.Button {
         else
             this._panelIcon.icon_name = 'phone-symbolic';
 
-        const wDesc = watts >= 0.1 ? `${watts.toFixed(1)} W` : '稳压 0 W';
-        this._sumLine1.text = `电池 ${cap ?? '?'}% (限 ${bat.end_threshold_pct ?? 80}%) · ${wDesc} · ${bat.temp_c ?? '?'} °C`;
+        const wDesc = formatPowerDesc(watts, bat.status);
+        const remS = Number(bat.restore_timer_remaining_s ?? 0);
+        const limDesc = remS > 0 ? `限 ${bat.end_threshold_pct ?? 100}%·剩${formatDurationShort(remS)}` : `限 ${bat.end_threshold_pct ?? 80}%`;
+        this._sumLine1.text = `电池 ${cap ?? '?'}% (${limDesc}) · ${wDesc} · ${bat.temp_c ?? '?'} °C`;
 
         const mem = st.memory ?? {};
         const svcs = this._netData?.services ?? {};
@@ -563,8 +686,10 @@ class SalamiTopBarButton extends PanelMenu.Button {
         this._catRows.get('perf').valLbl.text = perfShort;
 
         const endThr = bat.end_threshold_pct ?? 80;
-        const voocStr = bat.vooc_enabled ? '闪充' : '慢充';
-        this._catRows.get('power').valLbl.text = `限 ${endThr}% · ${voocStr}`;
+        const voocStr = !bat.vooc_enabled ? '慢充' : (Number(bat.vooc_cool_down ?? 0) > 0 ? '温充' : '闪充');
+        this._catRows.get('power').valLbl.text = remS > 0
+            ? `剩 ${formatDurationShort(remS)} · ${voocStr}`
+            : `限 ${endThr}% · ${voocStr}`;
 
         const scrOn = String(st.display?.dpms ?? 'On').toLowerCase() === 'on';
         const hz = st.display?.refresh_hz ?? st.display?.configured_refresh_hz ?? 120;
@@ -582,10 +707,16 @@ class SalamiTopBarButton extends PanelMenu.Button {
         this._catRows.get('network').valLbl.text = svcKeys.length > 0
             ? `${svcOk}/${svcKeys.length} 正常`
             : (st.network?.tcp_congestion_control ?? 'bbr');
+
+        if (this._flyoutCard?.visible && this._activeFlyoutKey && this._activeRowActor)
+            this._openCategoryFlyout(this._activeFlyoutKey, this._activeRowActor);
     }
 
     destroy() {
         this._cancelHideFlyout();
+        this._cancelPositionFlyout();
+        this._activeFlyoutKey = null;
+        this._activeRowActor = null;
         if (this._colorSchemeId && this._ifaceSettings) {
             this._ifaceSettings.disconnect(this._colorSchemeId);
             this._colorSchemeId = 0;
@@ -598,10 +729,11 @@ class SalamiTopBarButton extends PanelMenu.Button {
 export default class SalamiControlCenterExtension extends Extension {
     enable() {
         try {
-            Gio.Subprocess.new(
+            const stopProc = Gio.Subprocess.new(
                 ['/usr/bin/systemctl', '--user', 'stop', 'salami-tray.service'],
                 Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_SILENCE
             );
+            stopProc.wait_async(null, null);
         } catch {
             // ignore if systemd user unit is absent
         }

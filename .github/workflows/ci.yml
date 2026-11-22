@@ -32,6 +32,7 @@ jobs:
           python3 tests/test-power-key.py
           python3 tests/test-salami-ctl.py
           python3 tests/test-salami-tray.py
+          python3 tests/test-extensions-and-scripts.py
           python3 tests/test-mozilla-cache.py
           sh tests/import-modem-data.sh
 

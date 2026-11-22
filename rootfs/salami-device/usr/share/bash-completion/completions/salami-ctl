@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Bash completion for salami-ctl (OnePlus 11 mainline Linux control utility)
+
+_salami_ctl_complete() {
+    local cur prev words cword
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    local subcommands="status watch doctor perf screen refresh hbm vooc touch modem security service fstrim rdp net charge torch brightness vibrate"
+
+    if [ "$COMP_CWORD" -eq 1 ]; then
+        COMPREPLY=( $(compgen -W "$subcommands" -- "$cur") )
+        return 0
+    fi
+
+    local cmd="${COMP_WORDS[1]}"
+    case "$cmd" in
+        status|doctor|net|security)
+            COMPREPLY=( $(compgen -W "--json" -- "$cur") )
+            ;;
+        watch)
+            if [ "$prev" = "-n" ] || [ "$prev" = "--interval" ]; then
+                COMPREPLY=( $(compgen -W "0.5 1 2 5" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "-n --interval --count" -- "$cur") )
+            fi
+            ;;
+        perf)
+            COMPREPLY=( $(compgen -W "status eco balanced performance" -- "$cur") )
+            ;;
+        screen|hbm)
+            COMPREPLY=( $(compgen -W "status on off toggle" -- "$cur") )
+            ;;
+        refresh)
+            COMPREPLY=( $(compgen -W "status 60 90 120 --no-persist" -- "$cur") )
+            ;;
+        vooc)
+            if [ "$prev" = "--cool" ]; then
+                COMPREPLY=( $(compgen -W "0 4 8 12 16" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "status on off toggle --cool --persist" -- "$cur") )
+            fi
+            ;;
+        touch)
+            if [ "$COMP_CWORD" -eq 2 ]; then
+                COMPREPLY=( $(compgen -W "status glove mode off-policy" -- "$cur") )
+            elif [ "$COMP_CWORD" -eq 3 ]; then
+                case "${COMP_WORDS[2]}" in
+                    glove)
+                        COMPREPLY=( $(compgen -W "status on off toggle" -- "$cur") )
+                        ;;
+                    mode|off-policy)
+                        COMPREPLY=( $(compgen -W "gesture sleep active" -- "$cur") )
+                        ;;
+                esac
+            fi
+            ;;
+        modem)
+            COMPREPLY=( $(compgen -W "status recover guard --json" -- "$cur") )
+            ;;
+        rdp)
+            COMPREPLY=( $(compgen -W "status hq balanced fast 18 22 27" -- "$cur") )
+            ;;
+        charge)
+            if [ "$prev" = "--hours" ]; then
+                COMPREPLY=( $(compgen -W "2 6 12 24" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "status 80 90 100 --hours" -- "$cur") )
+            fi
+            ;;
+        torch)
+            COMPREPLY=( $(compgen -W "status on off toggle 24 64 180 255" -- "$cur") )
+            ;;
+        brightness)
+            COMPREPLY=( $(compgen -W "status 15% 35% 60% 85% 100% +10 -10" -- "$cur") )
+            ;;
+        vibrate)
+            COMPREPLY=( $(compgen -W "40 60 80 150 300" -- "$cur") )
+            ;;
+        service)
+            if [ "$COMP_CWORD" -eq 2 ]; then
+                COMPREPLY=( $(compgen -W "ssh.service gnome-remote-desktop.service smbd.service nginx.service docker.service" -- "$cur") )
+            elif [ "$COMP_CWORD" -eq 3 ]; then
+                COMPREPLY=( $(compgen -W "start stop restart reload" -- "$cur") )
+            fi
+            ;;
+    esac
+}
+
+complete -F _salami_ctl_complete salami-ctl

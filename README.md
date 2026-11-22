@@ -51,18 +51,20 @@
 桌面右上角状态栏自带 **「一加 11 控制台」**（实时显示电量/充电功率与温度），点开即可直接切换，无需输命令：
 
 - **性能档位**：节能静音 / 日常均衡 / 满血性能（3.19 GHz 睿频）
-- **电池与快充**：80% 日常护航限充、6h/12h 临时充满 100% 自动恢复、SUPERVOOC 50W 闪充开关
+- **电池与快充**：80% 日常护航限充、6h/12h 临时充满 100% 自动恢复（实时显示倒计时）、SUPERVOOC 50W 全速闪充 / 温和限流快充 / 10W 低温慢充切换
 - **屏幕与触控**：物理屏幕开关（远程连接时可单独熄灭手机屏）、亮度、阳光屏 HBM、`60 / 90 / 120 Hz` 刷新率、息屏双击亮屏 / 断触策略、手套模式、手电筒
-- **远程与网络**：远程桌面硬编画质档位、5G 基带状态与一键重连自愈、UFS `fstrim`、系统安全状态巡检
+- **远程与网络**：远程桌面硬编画质档位、一键系统体检（Doctor）、5G 基带状态与一键重连自愈、UFS `fstrim`、系统安全状态巡检
 
-终端或 SSH 下也可使用 `salami-ctl`：
+终端或 SSH 下也可使用 `salami-ctl`（自带 Bash 自动补全）：
 
 ```sh
-salami-ctl                    # 查看电池/快充/性能/温度/屏幕/存储/网络总览
+salami-ctl                    # 查看电池/快充/性能/温度/显示/存储/网络总览
+salami-ctl watch              # 实时刷新终端遥测看板（追踪峰值功率、温度与实时频率）
+salami-ctl doctor             # 一键全栈健康体检（8 大维度 PASS/WARN/FAIL + 修复建议）
 salami-ctl perf performance   # 切换 eco | balanced | performance
 salami-ctl charge 100 --hours 6
-salami-ctl vooc toggle        # 切换 50W 闪充 / 10W 慢充
-salami-ctl refresh 90         # 实时切换 60 | 90 | 120 Hz 刷新率
+salami-ctl vooc toggle        # 切换 50W 闪充 / 10W 慢充（支持 --cool 8 温和限流）
+salami-ctl refresh 90         # 实时切换 60 | 90 | 120 Hz 刷新率（加 --no-persist 免提权临时切换）
 salami-ctl hbm toggle         # 开关户外阳光屏高亮度激发
 salami-ctl touch off-policy gesture  # gesture 双击亮屏 | sleep 息屏断触 | active
 salami-ctl touch glove toggle # 开关手套触控模式

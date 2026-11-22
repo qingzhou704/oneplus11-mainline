@@ -80,10 +80,25 @@ def format_summary_lines(status: dict[str, Any], net_info: dict[str, Any] | None
     t = status["thermals_c"]
     m = status["memory"]
 
-    watts = b.get("power_w") or 0.0
-    w_str = f"{watts:.1f} W" if watts >= 0.1 else "0 W"
+    watts = abs(float(b.get("power_w") or 0.0))
+    b_status = str(b.get("status") or "")
+    if watts < 0.1:
+        w_str = "0 W"
+    elif b_status == "Discharging":
+        w_str = f"放电 {watts:.1f} W"
+    elif b_status == "Charging":
+        w_str = f"充电 {watts:.1f} W"
+    else:
+        w_str = f"{watts:.1f} W"
+    rem_s = b.get("restore_timer_remaining_s")
+    rem_txt = ctl.format_duration_short(rem_s) if rem_s else ""
+    lim_str = (
+        f"限充 {b.get('end_threshold_pct', 100)}% · 剩 {rem_txt}"
+        if rem_txt
+        else f"限充 {b.get('end_threshold_pct', 80)}%"
+    )
     line_1 = (
-        f"电池 {b.get('capacity_pct', '?')}% (限充 {b.get('end_threshold_pct', 80)}%) "
+        f"电池 {b.get('capacity_pct', '?')}% ({lim_str}) "
         f"· {w_str} · {b.get('temp_c', '?')} °C"
     )
     svc_part = ""
@@ -214,9 +229,18 @@ def run_tray() -> int:
                 self.charge_radios[key] = r
                 pow_sub.append(r)
             pow_sub.append(Gtk.SeparatorMenuItem())
-            self.chk_vooc = Gtk.CheckMenuItem(label="允许 SUPERVOOC 50W 闪充")
-            self.chk_vooc.connect("toggled", self._on_vooc_toggled)
-            pow_sub.append(self.chk_vooc)
+            self.vooc_radios: dict[str, Gtk.RadioMenuItem] = {}
+            v_group: list[Gtk.RadioMenuItem] = []
+            for vkey, vlabel in (
+                ("fast", "SUPERVOOC 50W 全速闪充"),
+                ("cool", "SUPERVOOC 温和限流快充"),
+                ("slow", "10W 低温慢充护航"),
+            ):
+                r = Gtk.RadioMenuItem.new_with_label(v_group, vlabel)
+                v_group = r.get_group()
+                r.connect("toggled", self._on_vooc_mode_toggled, vkey)
+                self.vooc_radios[vkey] = r
+                pow_sub.append(r)
             self.item_power.set_submenu(pow_sub)
             self.menu.append(self.item_power)
 
@@ -315,6 +339,19 @@ def run_tray() -> int:
             self.lbl_modem = Gtk.MenuItem(label="5G 基带读取中...", sensitive=False)
             srv_sub.append(self.lbl_modem)
 
+            doc_item = Gtk.MenuItem(label="运行一键系统体检 (Doctor)")
+            doc_item.connect(
+                "activate",
+                lambda _w: self._run_bg(
+                    lambda: subprocess.run(
+                        [str(CTL_PATH), "doctor"], capture_output=True, text=True
+                    ).stdout.strip()
+                    or "体检已完成",
+                    "一加 11 系统体检",
+                ),
+            )
+            srv_sub.append(doc_item)
+
             modem_heal = Gtk.MenuItem(label="重连自愈 5G 蜂窝基带")
             modem_heal.connect(
                 "activate",
@@ -351,15 +388,22 @@ def run_tray() -> int:
             )
             srv_sub.append(trim_item)
 
-            self.svc_items: dict[str, tuple[Gtk.MenuItem, str, str]] = {}
+            self.svc_items: dict[str, tuple[Gtk.MenuItem, Gtk.MenuItem, Gtk.MenuItem, str, str]] = {}
             self._managed_services = ctl.discover_managed_services()
             if self._managed_services:
                 srv_sub.append(Gtk.SeparatorMenuItem())
                 for unit, title, act in self._managed_services:
                     verb = "重载" if act == "reload" else "重启"
-                    it = Gtk.MenuItem(label=f"{verb} {title}")
-                    it.connect("activate", self._on_service_action, unit, title, act)
-                    self.svc_items[unit.removesuffix(".service")] = (it, title, act)
+                    it = Gtk.MenuItem(label=title)
+                    sub = Gtk.Menu()
+                    act_item = Gtk.MenuItem(label=f"{verb} {title}")
+                    act_item.connect("activate", self._on_service_primary, unit, title, act)
+                    stop_item = Gtk.MenuItem(label=f"停止 {title}")
+                    stop_item.connect("activate", self._on_service_action, unit, title, "stop")
+                    sub.append(act_item)
+                    sub.append(stop_item)
+                    it.set_submenu(sub)
+                    self.svc_items[unit.removesuffix(".service")] = (it, act_item, stop_item, title, act)
                     srv_sub.append(it)
 
             self.item_srv.set_submenu(srv_sub)
@@ -395,15 +439,24 @@ def run_tray() -> int:
                 self.item_perf.set_label(f"性能模式  ({perf_short})")
 
                 end_thr = status["battery"].get("end_threshold_pct") or 80
+                rem_s = status["battery"].get("restore_timer_remaining_s") or 0
                 if end_thr <= 80:
                     self.charge_radios["80"].set_active(True)
+                elif rem_s > 0:
+                    target_key = "100_12h" if rem_s > 6 * 3600 else "100_6h"
+                    self.charge_radios[target_key].set_active(True)
                 elif not any(
                     self.charge_radios[k].get_active() for k in ("100_6h", "100_12h", "100_keep")
                 ):
                     self.charge_radios["100_keep"].set_active(True)
                 vooc_on = bool(status["battery"].get("vooc_enabled"))
-                self.chk_vooc.set_active(vooc_on)
-                self.item_power.set_label(f"充电与快充  (限 {end_thr}% · {'闪充' if vooc_on else '慢充'})")
+                cool_lv = int(status["battery"].get("vooc_cool_down") or 0)
+                v_mode = "slow" if not vooc_on else ("cool" if cool_lv > 0 else "fast")
+                self.vooc_radios[v_mode].set_active(True)
+                v_txt = {"fast": "闪充", "cool": "温充", "slow": "慢充"}[v_mode]
+                rem_txt = ctl.format_duration_short(rem_s) if rem_s else ""
+                pow_head = f"剩 {rem_txt}" if rem_txt else f"限 {end_thr}%"
+                self.item_power.set_label(f"充电与快充  ({pow_head} · {v_txt})")
 
                 scr_on = str(status["display"].get("dpms", "")).lower() == "on"
                 self.chk_screen.set_active(scr_on)
@@ -454,11 +507,14 @@ def run_tray() -> int:
                     svcs = self._last_net.get("services") or {}
                     svc_ok = sum(1 for v in svcs.values() if v == "active")
                     self.item_srv.set_label(f"网络与服务  ({svc_ok}/{len(svcs)} 正常)")
-                    for key, (item, title, act) in self.svc_items.items():
+                    for key, (item, act_item, stop_item, title, act) in self.svc_items.items():
                         verb = "重载" if act == "reload" else "重启"
                         st = svcs.get(key, "?")
-                        state_txt = "运行中" if st == "active" else st
-                        item.set_label(f"{verb} {title} [{state_txt}]")
+                        active = st == "active"
+                        state_txt = "运行中" if active else st
+                        item.set_label(f"{title} [{state_txt}]")
+                        act_item.set_label(f"{verb} {title}" if active else f"启动 {title}")
+                        stop_item.set_sensitive(active)
             finally:
                 self._updating = False
 
@@ -489,12 +545,19 @@ def run_tray() -> int:
 
             self._run_bg(apply_charge, "已更新充电上限")
 
-        def _on_vooc_toggled(self, widget: Gtk.CheckMenuItem) -> None:
-            if self._updating:
+        def _on_vooc_mode_toggled(self, widget: Gtk.RadioMenuItem, vkey: str) -> None:
+            if self._updating or not widget.get_active():
                 return
             try:
-                st = ctl.set_vooc_state("on" if widget.get_active() else "off")
-                self._notify("已开启 SUPERVOOC 50W 闪充" if st["enabled"] else "已切换为 10W 低温慢充")
+                if vkey == "slow":
+                    ctl.set_vooc_state("off")
+                    self._notify("已切换为 10W 低温慢充护航")
+                elif vkey == "cool":
+                    ctl.set_vooc_state("on", cool_down=8)
+                    self._notify("已切换为 SUPERVOOC 温和限流快充")
+                else:
+                    ctl.set_vooc_state("on", cool_down=0)
+                    self._notify("已切换为 SUPERVOOC 50W 全速闪充")
             except Exception as exc:  # noqa: BLE001
                 self._notify("切换快充模式失败", str(exc))
             self.refresh()
@@ -578,11 +641,17 @@ def run_tray() -> int:
                 self._notify("设置 RDP 画质失败", str(exc))
             self.refresh()
 
+        def _on_service_primary(self, _widget: Gtk.MenuItem, unit: str, title: str, default_act: str) -> None:
+            svc_key = unit.removesuffix(".service")
+            svcs = (self._last_net or {}).get("services") or {}
+            act = default_act if svcs.get(svc_key) == "active" else "start"
+            self._on_service_action(_widget, unit, title, act)
+
         def _on_service_action(self, _widget: Gtk.MenuItem, unit: str, title: str, act: str) -> None:
-            verb = "重载" if act == "reload" else "重启"
+            verb = {"start": "启动", "stop": "停止", "restart": "重启", "reload": "重载"}.get(act, act)
             self._run_bg(
                 lambda: subprocess.check_call(
-                    ctl.build_privileged_command([str(CTL_PATH), "service", unit])
+                    ctl.build_privileged_command([str(CTL_PATH), "service", unit, act])
                 )
                 or f"{title} 已完成{verb}",
                 f"已{verb} {title}",

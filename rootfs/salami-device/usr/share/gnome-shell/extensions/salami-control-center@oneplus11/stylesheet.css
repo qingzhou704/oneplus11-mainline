@@ -43,11 +43,11 @@
 }
 
 .salami-flyout-slot {
-    width: 244px;
+    width: 264px;
 }
 
 .salami-flyout-card {
-    width: 244px;
+    width: 264px;
 }
 
 .salami-summary-box {
@@ -127,4 +127,30 @@
     padding: 5px 12px;
     font-size: 0.82em;
     opacity: 0.58;
+}
+
+.salami-svc-row {
+    spacing: 4px;
+}
+
+.salami-svc-main {
+    padding: 7px 10px 7px 12px;
+}
+
+.salami-svc-icon-btn {
+    border-radius: 10px;
+    padding: 6px 8px;
+    opacity: 0.72;
+}
+
+.salami-svc-stop-btn:hover {
+    background-color: rgba(224, 27, 36, 0.16);
+    color: #e01b24;
+    opacity: 1.0;
+}
+
+.salami-svc-start-btn:hover {
+    background-color: rgba(46, 194, 126, 0.16);
+    color: #26a269;
+    opacity: 1.0;
 }

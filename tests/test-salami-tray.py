@@ -60,6 +60,14 @@ class SalamiTrayModelTests(unittest.TestCase):
         self.assertIn("CPU 32.4 °C", l2)
         self.assertIn("服务 2/2", l2)
 
+    def test_summary_lines_show_discharging_power_and_restore_countdown(self):
+        st = self._sample_status(watts=4.8, bat_state="Discharging")
+        st["battery"]["end_threshold_pct"] = 100
+        st["battery"]["restore_timer_remaining_s"] = 5400
+        l1, _l2 = tray.format_summary_lines(st)
+        self.assertIn("放电 4.8 W", l1)
+        self.assertIn("剩 1h30m", l1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

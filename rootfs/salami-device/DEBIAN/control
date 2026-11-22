@@ -1,5 +1,5 @@
 Package: salami-device
-Version: 0.42
+Version: 0.43
 Architecture: arm64
 Maintainer: OnePlus 11 mainline port <noreply@localhost>
 Depends: systemd, systemd-zram-generator, systemd-oomd, irqbalance, rtkit, mobile-broadband-provider-info, openssh-server, python3, rmtfs (>= 1.1.1-2+salami1), zstd, linux-firmware-qualcomm-wireless, wireless-regdb, linux-firmware-qualcomm-graphics, usb-modeswitch, bluez, dmsetup, iw

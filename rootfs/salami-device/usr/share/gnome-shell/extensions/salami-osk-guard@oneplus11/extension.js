@@ -29,7 +29,7 @@ const GPU_PROFILE_HZ = {
 const PERF_MODES = [
     {id: 'eco', label: '节能静音 (≤1.84 GHz)', short: '节能静音', icon: 'power-profile-power-saver-symbolic'},
     {id: 'balanced', label: '日常均衡 (默认动态)', short: '日常均衡', icon: 'power-profile-balanced-symbolic'},
-    {id: 'performance', label: '满血性能 (全核高频)', short: '满血性能', icon: 'power-profile-performance-symbolic'},
+    {id: 'performance', label: '满血性能 (3.19 GHz 睿频)', short: '满血性能', icon: 'power-profile-performance-symbolic'},
 ];
 
 function readTextFile(path) {
