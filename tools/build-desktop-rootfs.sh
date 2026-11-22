@@ -28,9 +28,12 @@ gis=$(realpath -e "${GIS_DEB:?set GIS_DEB to the reviewed optional-password ARM6
 case "$(dpkg-deb -f "$gis" Version)" in *+salami*) ;; *) echo 'patched GIS package required' >&2; exit 2;; esac
 mirror=${UBUNTU_MIRROR:-https://ports.ubuntu.com/ubuntu-ports}
 case "$mirror" in https://*[!a-zA-Z0-9_./:+-]*|'') echo 'invalid HTTPS mirror' >&2; exit 2;; https://*) ;; *) echo 'HTTPS mirror required' >&2; exit 2;; esac
-for cmd in mmdebstrap qemu-aarch64-static dpkg-deb aarch64-linux-gnu-gcc alsatplg m4 curl gpg python3 xz; do
+for cmd in mmdebstrap dpkg-deb aarch64-linux-gnu-gcc alsatplg m4 curl gpg python3 xz; do
     command -v "$cmd" >/dev/null || { echo "missing tool: $cmd" >&2; exit 2; }
 done
+if [ "$(uname -m)" != aarch64 ]; then
+    command -v qemu-aarch64-static >/dev/null || { echo "missing tool: qemu-aarch64-static" >&2; exit 2; }
+fi
 printf 'New output: %s\nKernel input: %s\nRmtfs input: %s\nMirror: %s\n' "$out" "$kernel" "$rmtfs" "$mirror"
 mkdir -p "$out/inputs"
 date -u +%FT%TZ > "$out/build-start.txt"

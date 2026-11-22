@@ -14,8 +14,9 @@ cp "$here/kernel/sm8550-oneplus-salami.dts" "$here/kernel"/sm8550-oneplus-salami
     "$k/arch/arm64/boot/dts/qcom/"
 
 mkdir -p "$b"
+cc_prefix=${CROSS_COMPILE:-aarch64-linux-gnu-}
 if [ ! -f "$b/.config" ]; then
-    make -C "$k" O="$b" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+    make -C "$k" O="$b" ARCH=arm64 CROSS_COMPILE="$cc_prefix" \
         defconfig qcom.config
 fi
 KCONFIG_CONFIG="$b/.config" "$k/scripts/kconfig/merge_config.sh" -m -O "$b" \
@@ -26,8 +27,8 @@ KCONFIG_CONFIG="$b/.config" "$k/scripts/kconfig/merge_config.sh" -m -O "$b" \
     --set-str CONFIG_INITRAMFS_SOURCE "$cpio" \
     -e CONFIG_INITRAMFS_COMPRESSION_GZIP
 
-make -C "$k" O="$b" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION= olddefconfig
-make -C "$k" O="$b" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION= \
+make -C "$k" O="$b" ARCH=arm64 CROSS_COMPILE="$cc_prefix" LOCALVERSION= olddefconfig
+make -C "$k" O="$b" ARCH=arm64 CROSS_COMPILE="$cc_prefix" LOCALVERSION= \
     -j"$(nproc)" Image modules qcom/sm8550-oneplus-salami.dtb
 cat "$b/arch/arm64/boot/dts/qcom/sm8550-oneplus-salami.dtb" >> "$b/arch/arm64/boot/Image"
 

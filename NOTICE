@@ -18,6 +18,8 @@ Upstream projects and references
 
 * SM8550 / OnePlus mainline platform and driver work:
   - Linux Qualcomm (linux-msm) & Freedreno/Mesa communities
+  - denialwm/linux-perpetua SM8550 OnePlus baseline:
+    https://github.com/denialwm/linux-perpetua
   - Synaptics S3908 TouchComm I2C driver submission by Vsevolod Nevorotov
   - OnePlus open-source kernel/devicetree references:
     https://github.com/OnePlusOSS

@@ -35,7 +35,7 @@ python3 "$avbtool" add_hash_footer --image "$o/boot.img" --partition_name boot \
     --prop com.android.build.boot.security_patch:2026-04-01 \
     --prop com.android.build.boot.security_patch:2026-04-01
 python3 "$avbtool" verify_image --image "$o/boot.img" > "$o/evidence/avb.txt"
-make -s -C "$k" O="$b" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION= \
+make -s -C "$k" O="$b" ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}" LOCALVERSION= \
     INSTALL_MOD_PATH="$pkg" INSTALL_MOD_STRIP=1 DEPMOD=true modules_install
 rm -f "$pkg/lib/modules/$release/build"
 cp "$o/boot.img" "$pkg/boot/boot.img-$release"
