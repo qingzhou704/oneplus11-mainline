@@ -27,7 +27,7 @@ aarch64-linux-gnu-gcc -O2 -ffreestanding -nostdlib -shared -fPIC -Wl,-z,noexecst
     -o "$pkg/usr/lib/salami/libllvm-host-cpu.so" "$here/rootfs/llvm-host-cpu.c"
 chmod 644 "$pkg/usr/lib/salami/libllvm-host-cpu.so"
 # AudioReach topology: set AUDIOREACH_TOPOLOGY_DIR to a checkout of
-# https://github.com/Audioreach/audioreach-topology (needs m4, alsatplg).
+# https://github.com/linux-msm/audioreach-topology (needs m4, alsatplg).
 tplg_src=${AUDIOREACH_TOPOLOGY_DIR:-$here/../../sources/audioreach-topology}
 [ -d "$tplg_src" ] || { echo "missing audioreach-topology directory: set AUDIOREACH_TOPOLOGY_DIR ($tplg_src)" >&2; exit 2; }
 tplg=$pkg/usr/lib/firmware/qcom/sm8550/salamisnd-tplg.bin

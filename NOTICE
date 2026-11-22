@@ -26,7 +26,7 @@ Upstream projects and references
 
 * Audio, modem and video userspace/driver components:
   - AudioReach topology (BSD-3-Clause):
-    https://github.com/Audioreach/audioreach-topology
+    https://github.com/linux-msm/audioreach-topology
   - rmtfs Qualcomm Remote Filesystem Service (BSD-3-Clause):
     https://github.com/linux-msm/rmtfs
   - qcom-va-driver VA-API backend for Qualcomm Iris V4L2 stateful devices:

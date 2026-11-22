@@ -89,6 +89,6 @@ salami-ctl modem recover      # 一键重连自愈 5G 基带
 特别感谢以下上游项目与开发者：
 - **[yzddmr6/onepluspad-2pro-mainline](https://github.com/yzddmr6/onepluspad-2pro-mainline)** 与 **[yzddmr6/android-mainline-port](https://github.com/yzddmr6/android-mainline-port)**：提供了主线移植工程方法论、RAM 安全试启动闭环、构建校验体系与大量高通平台实践参考。
 - **Linux SM8550 / OnePlus 主线移植社区**：包括 OnePlus 12R（`aston`）主线适配参考、Vsevolod Nevorotov 的 Synaptics S3908 TouchComm 驱动工作，以及 [OnePlusOSS](https://github.com/OnePlusOSS) 开源参考代码。
-- **[Audioreach/audioreach-topology](https://github.com/Audioreach/audioreach-topology)**、**[linux-msm/rmtfs](https://github.com/linux-msm/rmtfs)** 与 **[radxa-pkg/qcom-va-driver](https://github.com/radxa-pkg/qcom-va-driver)**：分别提供了音频拓扑、调制解调器远程文件系统服务与高通 Iris VA-API 视频编解码后端。
+- **[linux-msm/audioreach-topology](https://github.com/linux-msm/audioreach-topology)**、**[linux-msm/rmtfs](https://github.com/linux-msm/rmtfs)** 与 **[radxa-pkg/qcom-va-driver](https://github.com/radxa-pkg/qcom-va-driver)**：分别提供了音频拓扑、调制解调器远程文件系统服务与高通 Iris VA-API 视频编解码后端。
 
 除文件另有声明外，本仓库原创集成代码与脚本采用 **GPL-2.0-only** 许可证。Linux 内核及各第三方组件保留各自原作者署名与许可证，详见 **[LICENSE](LICENSE)** 与 **[NOTICE](NOTICE)**。

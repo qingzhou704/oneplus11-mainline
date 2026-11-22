@@ -30,7 +30,7 @@ jobs:
           df -h
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install native ARM64 kernel & rootfs build tools
         run: |
@@ -59,7 +59,7 @@ jobs:
           git -C /var/tmp/src/kernel checkout FETCH_HEAD
           sh tools/apply-kernel-patches.sh /var/tmp/src/kernel
 
-          git clone --depth=1 https://github.com/Audioreach/audioreach-topology.git /var/tmp/src/audioreach-topology
+          git clone --depth=1 https://github.com/linux-msm/audioreach-topology.git /var/tmp/src/audioreach-topology
           git clone --depth=1 https://android.googlesource.com/platform/system/tools/mkbootimg /var/tmp/src/mkbootimg
           git clone --depth=1 https://android.googlesource.com/platform/external/avb /var/tmp/src/avb
 

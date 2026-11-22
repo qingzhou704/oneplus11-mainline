@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install build & test dependencies
         run: |
@@ -37,7 +37,7 @@ jobs:
 
       - name: Clone AudioReach topology macros
         run: |
-          git clone --depth=1 https://github.com/Audioreach/audioreach-topology.git /tmp/audioreach-topology
+          git clone --depth=1 https://github.com/linux-msm/audioreach-topology.git /tmp/audioreach-topology
 
       - name: Build salami-device & passwordless policy packages
         run: |
