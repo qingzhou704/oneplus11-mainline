@@ -1,5 +1,8 @@
 # Ubuntu / Mainline Linux for OnePlus 11
 
+[![CI](https://github.com/qingzhou704/oneplus11-mainline-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/qingzhou704/oneplus11-mainline-linux/actions/workflows/ci.yml)
+[![Build & Release](https://github.com/qingzhou704/oneplus11-mainline-linux/actions/workflows/release.yml/badge.svg)](https://github.com/qingzhou704/oneplus11-mainline-linux/actions/workflows/release.yml)
+
 在一加 11（`PHB110 / salami / 骁龙 8 Gen 2 SM8550`）上运行原生 **Ubuntu Desktop 26.04**，采用 GNOME 桌面与主线 **Linux 7.3.5** 内核。
 
 预构建刷机镜像发布在本仓库 **[Releases](https://github.com/qingzhou704/oneplus11-mainline-linux/releases)**，刷入步骤见 **[安装说明](INSTALL.md)**。

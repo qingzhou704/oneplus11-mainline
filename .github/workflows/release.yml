@@ -1,0 +1,133 @@
+name: Build Full Kernel, Rootfs & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional Release tag to create/update (e.g. v0.69-7.3.5); leave empty for artifact-only build'
+        required: false
+        default: ''
+      localversion:
+        description: 'Kernel CONFIG_LOCALVERSION suffix'
+        required: false
+        default: '-salami068'
+
+permissions:
+  contents: write
+
+jobs:
+  build-system:
+    name: Native ARM64 Full Build (Kernel 7.3.5 + Ubuntu 26.04 Rootfs)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - name: Free runner disk space for kernel & rootfs build
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install native ARM64 kernel & rootfs build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            alsa-topology-conf alsa-utils bc bison busybox-static ca-certificates \
+            ccache cpio curl debhelper devscripts dpkg-dev e2fsprogs flex gcc \
+            gdisk git gnupg libssl-dev m4 make mmdebstrap pahole patch perl \
+            python3 qemu-user-static rsync tar xz-utils zstd
+
+      - name: Restore ccache for fast incremental kernel builds
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: salami-arm64-ccache-${{ hashFiles('kernel/**', 'patches/**') }}
+          restore-keys: |
+            salami-arm64-ccache-
+
+      - name: Fetch upstream kernel base, AOSP boot tools & AudioReach topology
+        run: |
+          mkdir -p /var/tmp/src
+          git init /var/tmp/src/kernel
+          git -C /var/tmp/src/kernel fetch --depth=1 \
+            https://github.com/denialwm/linux-perpetua.git \
+            f2941a66b02ad4e71ca2b219368bac57c8bf8c50
+          git -C /var/tmp/src/kernel checkout FETCH_HEAD
+          sh tools/apply-kernel-patches.sh /var/tmp/src/kernel
+
+          git clone --depth=1 https://github.com/Audioreach/audioreach-topology.git /var/tmp/src/audioreach-topology
+          git clone --depth=1 https://android.googlesource.com/platform/system/tools/mkbootimg /var/tmp/src/mkbootimg
+          git clone --depth=1 https://android.googlesource.com/platform/external/avb /var/tmp/src/avb
+
+      - name: Build ARM64 initramfs & Linux 7.3.5 kernel (boot.img + .deb)
+        run: |
+          export PATH="/usr/lib/ccache:$PATH"
+          export CROSS_COMPILE="ccache aarch64-linux-gnu-"
+          export MKBOOTIMG=/var/tmp/src/mkbootimg/mkbootimg.py
+          export AVBTOOL=/var/tmp/src/avb/avbtool.py
+          lv="${{ inputs.localversion || '-salami068' }}"
+
+          sh tools/build-full-initramfs.sh /var/tmp/src/kernel /var/tmp/initramfs "ci${lv}"
+          sh tools/build-kernel.sh \
+            /var/tmp/src/kernel \
+            /var/tmp/kernel-out \
+            /var/tmp/kernel-pkg \
+            /var/tmp/initramfs/firstboot.cpio \
+            "$lv"
+          ccache -s
+          rm -rf /var/tmp/src/kernel /var/tmp/kernel-out
+
+      - name: Build Ubuntu 26.04 companion packages (rmtfs, qcom-va-driver, GIS, GRD)
+        run: |
+          sudo sh tools/ci-build-companion-debs.sh /var/tmp/companion-debs
+
+      - name: Assemble & verify clean Ubuntu 26.04 Desktop rootfs.tar.xz
+        run: |
+          kdeb=$(ls /var/tmp/kernel-pkg/linux-image-*.deb | head -n 1)
+          sudo env \
+            AUDIOREACH_TOPOLOGY_DIR=/var/tmp/src/audioreach-topology \
+            GIS_DEB=/var/tmp/companion-debs/gnome-initial-setup.deb \
+            QCOM_VA_DEB=/var/tmp/companion-debs/qcom-va-driver.deb \
+            GRD_DEB=/var/tmp/companion-debs/gnome-remote-desktop.deb \
+            sh tools/build-desktop-rootfs.sh \
+              /var/tmp/salami-release \
+              "$kdeb" \
+              /var/tmp/companion-debs/rmtfs.deb
+
+          mkdir -p release-dist
+          sudo cp /var/tmp/salami-release/boot.img release-dist/boot.img
+          sudo cp /var/tmp/salami-release/rootfs.tar.xz release-dist/rootfs.tar.xz
+          sudo cp "$kdeb" release-dist/
+          dev_ver=$(dpkg-deb -f /var/tmp/salami-release/inputs/device.deb Version)
+          sudo cp /var/tmp/salami-release/inputs/device.deb "release-dist/salami-device_${dev_ver}_arm64.deb"
+          sudo chown -R "$USER:$USER" release-dist
+          sudo rm -rf /var/tmp/salami-release
+          (cd release-dist && sha256sum boot.img rootfs.tar.xz *.deb > SHA256SUMS && cat SHA256SUMS)
+
+      - name: Upload full flashable build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: oneplus11-ubuntu-desktop-images
+          path: release-dist/*
+          retention-days: 14
+
+      - name: Publish or update GitHub Release (on tag push or requested release_tag)
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ inputs.release_tag }}"
+          if [ -z "$tag" ]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" release-dist/* --clobber
+          else
+            gh release create "$tag" release-dist/* \
+              --title "Ubuntu 26.04 & Mainline Linux for OnePlus 11 ($tag)" \
+              --generate-notes
+          fi

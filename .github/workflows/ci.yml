@@ -1,0 +1,56 @@
+name: CI — Tests & Device Package
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    name: Unit Tests & salami-device (.deb)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build & test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            alsa-topology-conf alsa-utils ca-certificates dpkg-dev gcc git m4 python3 zstd
+
+      - name: Run all offline unit & hygiene test suites
+        run: |
+          python3 tests/test-opensource-cleanliness.py
+          python3 tests/test-desktop-rootfs.py
+          python3 tests/test-device-postinst-offline.py
+          python3 tests/test-import-gpu-firmware.py
+          python3 tests/test-power-key.py
+          python3 tests/test-salami-ctl.py
+          python3 tests/test-salami-tray.py
+          python3 tests/test-mozilla-cache.py
+          sh tests/import-modem-data.sh
+
+      - name: Clone AudioReach topology macros
+        run: |
+          git clone --depth=1 https://github.com/Audioreach/audioreach-topology.git /tmp/audioreach-topology
+
+      - name: Build salami-device & passwordless policy packages
+        run: |
+          AUDIOREACH_TOPOLOGY_DIR=/tmp/audioreach-topology sh tools/build-device-deb.sh /tmp/out-device
+          sh tools/build-passwordless-policy.sh /tmp/out-passwordless
+          mkdir -p dist
+          ver=$(dpkg-deb -f /tmp/out-device/salami-device.deb Version)
+          cp /tmp/out-device/salami-device.deb "dist/salami-device_${ver}_arm64.deb"
+          cp /tmp/out-passwordless/salami-desktop-passwordless.deb dist/
+          (cd dist && sha256sum *.deb > SHA256SUMS && cat SHA256SUMS)
+
+      - name: Upload built Debian packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: salami-device-packages
+          path: dist/*
