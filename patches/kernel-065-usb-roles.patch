@@ -1,0 +1,66 @@
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index f9927b0cf..0b875eeb0 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -2255,8 +2255,11 @@ static void qcom_battmgr_enable_worker(struct work_struct *work)
+ 
+ 	mutex_lock(&battmgr->lock);
+ 	ret = qcom_battmgr_request(battmgr, &req, sizeof(req));
+-	if (ret)
+-		dev_err(battmgr->dev, "failed to request power notifications\n");
++	if (ret) {
++		dev_err(battmgr->dev, "failed to request power notifications: %d\n", ret);
++		mutex_unlock(&battmgr->lock);
++		return;
++	}
+ 
+ 	if (battmgr->variant == OPLUS_BATTMGR_SM8550) {
+ 		battmgr->oplus.charge_state_valid = false;
+diff --git a/drivers/usb/typec/ucsi/ucsi.c b/drivers/usb/typec/ucsi/ucsi.c
+index c1450639c..28825b5d2 100644
+--- a/drivers/usb/typec/ucsi/ucsi.c
++++ b/drivers/usb/typec/ucsi/ucsi.c
+@@ -1367,10 +1367,10 @@ static void ucsi_partner_change(struct ucsi_connector *con)
+ 			typec_partner_set_usb_mode(con->partner, USB_MODE_USB4);
+ 	}
+ 
+-	if ((!UCSI_CONSTAT(con, PARTNER_FLAG_USB)) &&
+-	    ((con->ucsi->quirks & UCSI_USB4_IMPLIES_USB) &&
+-	     (!(UCSI_CONSTAT(con, PARTNER_FLAG_USB4_GEN3) ||
+-		UCSI_CONSTAT(con, PARTNER_FLAG_USB4_GEN4)))))
++	if (!UCSI_CONSTAT(con, PARTNER_FLAG_USB) &&
++	    (!(con->ucsi->quirks & UCSI_USB4_IMPLIES_USB) ||
++	     !(UCSI_CONSTAT(con, PARTNER_FLAG_USB4_GEN3) ||
++	       UCSI_CONSTAT(con, PARTNER_FLAG_USB4_GEN4))))
+ 		u_role = USB_ROLE_NONE;
+ 
+ 	ret = usb_role_switch_set_role(con->usb_role_sw, u_role);
+diff --git a/drivers/usb/typec/ucsi/ucsi_glink.c b/drivers/usb/typec/ucsi/ucsi_glink.c
+index d833d8bad..eb44e5fc4 100644
+--- a/drivers/usb/typec/ucsi/ucsi_glink.c
++++ b/drivers/usb/typec/ucsi/ucsi_glink.c
+@@ -315,7 +315,7 @@ static void pmic_glink_ucsi_register(struct work_struct *work)
+ 	struct pmic_glink_ucsi *ucsi = container_of(work, struct pmic_glink_ucsi, register_work);
+ 	unsigned long flags;
+ 	bool pd_running;
+-	int tries;
++	int ret, tries;
+ 
+ 	spin_lock_irqsave(&ucsi->state_lock, flags);
+ 	pd_running = ucsi->pd_running;
+@@ -328,9 +328,14 @@ static void pmic_glink_ucsi_register(struct work_struct *work)
+ 		 * version read then times out; reading again gets both answered.
+ 		 */
+ 		for (tries = 3; tries; tries--) {
+-			if (ucsi_register(ucsi->ucsi) != -ETIMEDOUT)
++			ret = ucsi_register(ucsi->ucsi);
++			if (ret != -ETIMEDOUT)
+ 				break;
+ 		}
++		if (ret) {
++			dev_err(ucsi->dev, "failed to register UCSI: %d\n", ret);
++			return;
++		}
+ 		ucsi->ucsi_registered = true;
+ 	} else if (ucsi->ucsi_registered && !pd_running) {
+ 		ucsi_unregister(ucsi->ucsi);

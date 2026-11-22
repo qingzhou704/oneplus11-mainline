@@ -1,0 +1,16 @@
+{
+  "uuid": "salami-osk-guard@oneplus11",
+  "name": "OnePlus 11 Touch Modal and GDM Guard",
+  "description": "Guard Main.keyboard.maybeHandleEvent on touch modal dialogs, prevent LoginDialog user-list overlap, and keep GDM ScreenShield dialog visible on wake",
+  "shell-version": [
+    "49",
+    "50"
+  ],
+  "session-modes": [
+    "user",
+    "ubuntu",
+    "unlock-dialog",
+    "gdm",
+    "initial-setup"
+  ]
+}

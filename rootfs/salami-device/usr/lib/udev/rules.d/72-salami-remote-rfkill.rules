@@ -1,0 +1,3 @@
+# GNOME Remote Login sessions have no local seat ACL on /dev/rfkill, hiding
+# Bluetooth quick settings. Grant radio switch access to local administrators.
+SUBSYSTEM=="misc", KERNEL=="rfkill", GROUP="sudo", MODE="0664"

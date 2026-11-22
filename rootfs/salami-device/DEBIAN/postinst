@@ -1,0 +1,137 @@
+#!/bin/sh
+set -e
+# Offline installs must create enablement links but must not contact the host's
+# service manager or import firmware from build-host block devices.
+live_system=false
+if [ -d /run/systemd/system ] && ! systemd-detect-virt --quiet --chroot; then
+    live_system=true
+fi
+# Re-derive the WCN7850 board file whenever linux-firmware changes it. Keep an existing board
+# file rather than failing the package: an upstream board-2.bin layout change must not block
+# every later apt operation. A first install has nothing to fall back to, so it still fails.
+if [ "$1" = triggered ] || [ "$1" = configure ]; then
+    if ! /usr/lib/salami/wifi-board; then
+        [ -s /usr/lib/firmware/updates/ath12k/WCN7850/hw2.0/board-2.bin ] || exit 1
+        echo "salami-device: warning: Wi-Fi board file was not regenerated; keeping the existing one" >&2
+    fi
+fi
+if [ "$1" = configure ]; then
+    if [ -z "$2" ]; then
+        # First install only; the debug shell stays as the operator left it on upgrades.
+        # salami-debug-shell.socket is deliberately not enabled: SSH over USB and the WLAN
+        # remote desktop are the supported entries, and the socket is an unauthenticated root
+        # shell. Open it explicitly for bring-up: systemctl enable --now salami-debug-shell.socket
+        systemctl enable salami-usb-gadget.service salami-ssh-hostkeys.service \
+            systemd-networkd.service
+    fi
+    if [ -z "$2" ] || dpkg --compare-versions "$2" lt 0.3; then
+        systemctl enable salami-mark-boot.service
+    fi
+    if [ -z "$2" ] || dpkg --compare-versions "$2" lt 0.4; then
+        # networkd only runs the USB link, which is never required online; with nothing to
+        # wait for its wait-online unit fails every boot. NetworkManager answers network-online.
+        systemctl disable systemd-networkd-wait-online.service
+    fi
+    if [ -n "$2" ] && dpkg --compare-versions "$2" lt 0.5; then
+        # Shaders cached before 0.5 were compiled for SVE; the cache key does not include the CPU.
+        rm -rf /home/*/.cache/mesa_shader_cache* /var/lib/gdm3/.cache/mesa_shader_cache*
+    fi
+    if [ -z "$2" ] || dpkg --compare-versions "$2" lt 0.6; then
+        # rmtfs-dir works on EFS copies; the packaged rmtfs.service would read the partitions.
+        systemctl disable rmtfs.service
+        systemctl enable salami-import-modem-data.service rmtfs-dir.service
+        if $live_system; then systemctl start salami-import-modem-data.service; fi
+    fi
+    if [ -n "$2" ] && dpkg --compare-versions "$2" lt 0.11; then
+        if $live_system; then systemctl daemon-reload; fi
+        if $live_system; then systemctl start salami-import-modem-data.service; fi
+    fi
+    if [ -z "$2" ] || dpkg --compare-versions "$2" lt 0.12; then
+        if $live_system; then systemctl daemon-reload; fi
+        systemctl enable salami-import-gpu-firmware.service
+        if $live_system; then systemctl start salami-import-gpu-firmware.service; fi
+    fi
+    if [ -z "$2" ] || dpkg --compare-versions "$2" lt 0.25; then
+        if $live_system; then systemctl daemon-reload; fi
+        systemctl enable salami-power-key.service
+        if $live_system; then systemctl restart salami-power-key.service; fi
+    elif $live_system; then
+        systemctl daemon-reload
+        systemctl restart salami-power-key.service
+    fi
+    if [ -n "$2" ] && dpkg --compare-versions "$2" lt 0.30; then
+        if $live_system; then
+            systemctl daemon-reload
+            systemctl start salami-import-gpu-firmware.service salami-import-modem-data.service
+        fi
+    fi
+    if [ -z "$2" ] || dpkg --compare-versions "$2" lt 0.35; then
+        systemctl enable systemd-oomd.service fstrim.timer
+    fi
+    if [ -z "$2" ] || dpkg --compare-versions "$2" lt 0.36; then
+        systemctl enable irqbalance.service
+    fi
+    if [ -z "$2" ] || dpkg --compare-versions "$2" lt 0.40; then
+        systemctl enable salami-ufs-tune.service salami-modem-guard.timer
+    fi
+    rm -rf /usr/lib/salami/__pycache__ 2>/dev/null || true
+    if [ -w /var/lib ]; then
+        mkdir -p /var/lib/salami
+        if [ ! -f /var/lib/salami/touch-screen-off-mode ]; then
+            printf 'gesture\n' > /var/lib/salami/touch-screen-off-mode
+        fi
+        chgrp sudo /var/lib/salami/touch-screen-off-mode 2>/dev/null || true
+        chmod 0664 /var/lib/salami/touch-screen-off-mode 2>/dev/null || true
+    fi
+    # Reload every version on a live device, never in the offline image builder.
+    if $live_system; then
+        udevadm control --reload
+        if [ -n "$2" ] && dpkg --compare-versions "$2" lt 0.31; then
+            udevadm trigger --action=add --subsystem-match=video4linux || true
+        fi
+        if [ -n "$2" ] && dpkg --compare-versions "$2" lt 0.33; then
+            systemctl reload NetworkManager.service || true
+            systemctl reload-or-restart systemd-journald.service || true
+            journalctl --vacuum-size=512M >/dev/null 2>&1 || true
+        fi
+        if [ -z "$2" ] || dpkg --compare-versions "$2" lt 0.34; then
+            udevadm trigger --action=change --subsystem-match=leds --subsystem-match=backlight \
+                --subsystem-match=power_supply --subsystem-match=input || true
+            modprobe tcp_bbr 2>/dev/null || true
+            modprobe sch_fq 2>/dev/null || true
+            sysctl --system >/dev/null 2>&1 || true
+        fi
+        if [ -z "$2" ] || dpkg --compare-versions "$2" lt 0.35; then
+            udevadm trigger --action=change --subsystem-match=cpu --subsystem-match=block || true
+            systemctl daemon-reload
+            systemctl start systemd-oomd.service fstrim.timer || true
+            systemctl reload NetworkManager.service || true
+            /usr/sbin/iw dev wlp1s0 set power_save off 2>/dev/null || true
+        fi
+        if [ -z "$2" ] || dpkg --compare-versions "$2" lt 0.36; then
+            udevadm trigger --action=change --subsystem-match=devfreq || true
+            systemctl daemon-reload
+            systemctl start irqbalance.service || true
+            sysctl --system >/dev/null 2>&1 || true
+        fi
+        if [ -z "$2" ] || dpkg --compare-versions "$2" lt 0.38; then
+            systemctl daemon-reload
+            systemctl start systemd-zram-setup@zram0.service || true
+            sysctl --system >/dev/null 2>&1 || true
+        fi
+        if [ -z "$2" ] || dpkg --compare-versions "$2" lt 0.39; then
+            udevadm trigger --action=change --subsystem-match=cpu --subsystem-match=module || true
+        fi
+        if [ -z "$2" ] || dpkg --compare-versions "$2" lt 0.40; then
+            rm -f /etc/NetworkManager/conf.d/60-salami-wifi-powersave.conf
+            udevadm trigger --action=change --subsystem-match=module --subsystem-match=block || true
+            systemctl daemon-reload
+            systemctl reload NetworkManager.service || true
+            /usr/sbin/iw dev wlp1s0 set power_save off 2>/dev/null || true
+            systemctl start salami-ufs-tune.service salami-modem-guard.timer || true
+        fi
+        if [ -z "$2" ] || dpkg --compare-versions "$2" lt 0.41; then
+            sysctl --system >/dev/null 2>&1 || true
+        fi
+    fi
+fi

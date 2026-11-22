@@ -1,0 +1,654 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""GNOME / Ubuntu top-bar AppIndicator control center for OnePlus 11 (salami) Linux."""
+
+from __future__ import annotations
+
+from importlib.machinery import SourceFileLoader
+import importlib.util
+from pathlib import Path
+import subprocess
+import sys
+import threading
+from typing import Any
+
+sys.dont_write_bytecode = True
+
+HERE = Path(__file__).resolve().parent
+CTL_PATH = HERE / "salami-ctl"
+
+_spec = importlib.util.spec_from_loader("salami_ctl_embedded", SourceFileLoader("salami_ctl_embedded", str(CTL_PATH)))
+assert _spec is not None and _spec.loader is not None
+ctl = importlib.util.module_from_spec(_spec)
+sys.modules["salami_ctl_embedded"] = ctl
+_spec.loader.exec_module(ctl)
+
+BRIGHTNESS_PRESETS: tuple[tuple[int, str], ...] = (
+    (15, "15% · 夜间微光"),
+    (35, "35% · 室内舒适"),
+    (60, "60% · 日常明亮"),
+    (85, "85% · 高亮清晰"),
+    (100, "100% · 峰值极亮"),
+)
+TORCH_PRESETS: tuple[tuple[int, str], ...] = (
+    (0, "关闭手电筒"),
+    (24, "弱光夜起 (24)"),
+    (64, "标准常亮 (64)"),
+    (180, "强光照明 (180)"),
+)
+
+
+def format_indicator_label(status: dict[str, Any]) -> str:
+    bat = status.get("battery") or {}
+    therm = status.get("thermals_c") or {}
+    perf = (status.get("perf") or {}).get("mode", "balanced")
+
+    cap = bat.get("capacity_pct")
+    watts = bat.get("power_w") or 0.0
+    bat_state = bat.get("status", "")
+    cpu_t = therm.get("cpu_max")
+
+    badge = ""
+    if perf == "performance":
+        badge = "🚀 "
+    elif perf == "eco":
+        badge = "🌿 "
+
+    if watts >= 0.8 and bat_state == "Charging":
+        power_part = f"⚡{watts:.0f}W"
+    elif cap is not None:
+        power_part = f"{cap}%"
+    else:
+        power_part = "salami"
+
+    temp_part = f" · {cpu_t:.0f}°C" if cpu_t is not None else ""
+    return f" {badge}{power_part}{temp_part}"
+
+
+def choose_indicator_icon(status: dict[str, Any]) -> str:
+    bat = status.get("battery") or {}
+    perf = (status.get("perf") or {}).get("mode", "balanced")
+    watts = bat.get("power_w") or 0.0
+    if watts >= 5.0 and bat.get("status") == "Charging":
+        return "battery-good-charging-symbolic"
+    if perf == "performance":
+        return "power-profile-performance-symbolic"
+    if perf == "eco":
+        return "power-profile-power-saver-symbolic"
+    return "phone-symbolic"
+
+
+def nearest_preset(value: int, presets: tuple[tuple[int, str], ...]) -> int:
+    return min(presets, key=lambda item: abs(item[0] - value))[0]
+
+
+def format_summary_lines(status: dict[str, Any], net_info: dict[str, Any] | None = None) -> tuple[str, str, str, str]:
+    b = status["battery"]
+    t = status["thermals_c"]
+    m = status["memory"]
+    st = status["storage"]
+    n = status["network"]
+
+    watts = b.get("power_w") or 0.0
+    w_str = f"{watts:.1f} W" if watts >= 0.1 else "0 W (稳压保持)"
+    line_bat = (
+        f"电池: {b.get('capacity_pct', '?')}% ({b.get('start_threshold_pct', '?')}–{b.get('end_threshold_pct', '?')}% 限充) "
+        f"· {w_str} · {b.get('temp_c', '?')} °C"
+    )
+    line_temp = (
+        f"温度: CPU {t.get('cpu_max', '?')} °C · GPU {t.get('gpu_max', '?')} °C · 机身 {t.get('skin', '?')} °C"
+    )
+    zram = m.get("zram") or {}
+    z_mib = zram.get("compr_mib", 0)
+    line_mem = (
+        f"存储: RAM {m.get('ram_used_gib', '?')}/{m.get('ram_total_gib', '?')} GiB · "
+        f"ZRAM {z_mib}M · UFS [{st.get('ufs_scheduler', '?')}/{st.get('read_ahead_kb', '?')}K]"
+    )
+    if net_info:
+        svc_ok = sum(1 for v in net_info["services"].values() if v == "active")
+        svc_total = len(net_info["services"])
+        conn = net_info.get("connectivity", "?")
+        line_net = f"网络: 连通={conn} · {n.get('tcp_congestion_control', '?')}+{n.get('default_qdisc', '?')} · 服务 {svc_ok}/{svc_total} 正常"
+    else:
+        line_net = f"网络: TCP {n.get('tcp_congestion_control', '?')} + {n.get('default_qdisc', '?')}"
+    return line_bat, line_temp, line_mem, line_net
+
+
+def run_tray() -> int:
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("AyatanaAppIndicator3", "0.1")
+    from gi.repository import AyatanaAppIndicator3, Gio, GLib, Gtk
+
+    class SalamiTrayApp:
+        def __init__(self) -> None:
+            self._updating = False
+            self._last_net: dict[str, Any] | None = None
+            self._net_tick = 0
+
+            self.indicator = AyatanaAppIndicator3.Indicator.new(
+                "salami-control-center",
+                "phone-symbolic",
+                AyatanaAppIndicator3.IndicatorCategory.HARDWARE,
+            )
+            self.indicator.set_status(AyatanaAppIndicator3.IndicatorStatus.ACTIVE)
+            self.indicator.set_title("一加 11 控制台")
+
+            self.menu = Gtk.Menu()
+            self._build_menu()
+            self.indicator.set_menu(self.menu)
+
+            self.refresh(refresh_net=True)
+            GLib.timeout_add_seconds(12, self._on_timer)
+
+        def _notify(self, summary: str, body: str = "") -> None:
+            try:
+                bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+                bus.call_sync(
+                    "org.freedesktop.Notifications",
+                    "/org/freedesktop/Notifications",
+                    "org.freedesktop.Notifications",
+                    "Notify",
+                    GLib.Variant(
+                        "(susssasa{sv}i)",
+                        ("一加 11 控制台", 0, "phone-symbolic", summary, body, [], {}, 2500),
+                    ),
+                    None,
+                    Gio.DBusCallFlags.NONE,
+                    1500,
+                    None,
+                )
+            except GLib.Error:
+                pass
+
+        def _run_bg(self, fn, done_title: str | None = None) -> None:
+            def worker() -> None:
+                err: str | None = None
+                detail = ""
+                try:
+                    res = fn()
+                    if isinstance(res, str):
+                        detail = res
+                except Exception as exc:  # noqa: BLE001
+                    err = str(exc)
+
+                def finish() -> bool:
+                    self.refresh(refresh_net=True)
+                    if err:
+                        self._notify("操作失败", err)
+                    elif done_title:
+                        self._notify(done_title, detail)
+                    return False
+
+                GLib.idle_add(finish)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def _build_menu(self) -> None:
+            hdr = Gtk.MenuItem(label="⚡ 一加 11 硬件与服务器控制台（点击刷新）")
+            hdr.connect("activate", lambda _w: self.refresh(refresh_net=True))
+            self.menu.append(hdr)
+
+            self.lbl_bat = Gtk.MenuItem(label="电池: 读取中...", sensitive=False)
+            self.lbl_temp = Gtk.MenuItem(label="温度: 读取中...", sensitive=False)
+            self.lbl_mem = Gtk.MenuItem(label="存储: 读取中...", sensitive=False)
+            self.lbl_net = Gtk.MenuItem(label="网络: 读取中...", sensitive=False)
+            for item in (self.lbl_bat, self.lbl_temp, self.lbl_mem, self.lbl_net):
+                self.menu.append(item)
+
+            self.menu.append(Gtk.SeparatorMenuItem())
+
+            # 1. Whole-SoC Performance Modes (Radio items)
+            perf_hdr = Gtk.MenuItem(label="🚀 骁龙 8 Gen 2 性能档位 (CPU + GPU)", sensitive=False)
+            self.menu.append(perf_hdr)
+            self.perf_radios: dict[str, Gtk.RadioMenuItem] = {}
+            group: list[Gtk.RadioMenuItem] = []
+            for mode, text in (
+                ("eco", "🌿 节能静音 (CPU≤1.84G / GPU≤401M 低温挂机)"),
+                ("balanced", "⚖️ 日常均衡 (全核动态满频 · 默认)"),
+                ("performance", "🔥 满血性能 (X3 3.19G 睿频 + GPU 提频)"),
+            ):
+                r = Gtk.RadioMenuItem.new_with_label(group, text)
+                group = r.get_group()
+                r.connect("toggled", self._on_perf_toggled, mode)
+                self.perf_radios[mode] = r
+                self.menu.append(r)
+
+            self.menu.append(Gtk.SeparatorMenuItem())
+
+            # 2. Battery Charge Ceiling & Timed Outage/Travel Full-Charge
+            bat_hdr = Gtk.MenuItem(label="🔋 充电上限与临时满充策略", sensitive=False)
+            self.menu.append(bat_hdr)
+            self.charge_radios: dict[str, Gtk.RadioMenuItem] = {}
+            c_group: list[Gtk.RadioMenuItem] = []
+            for key, text in (
+                ("80", "🛡️ 日常 80% 护航限充 (75–80% 保护电池寿命)"),
+                ("100_6h", "⚡ 临时充满 100% (6 小时后自动恢复 80%)"),
+                ("100_12h", "⚡ 临时充满 100% (12 小时后自动恢复 80%)"),
+                ("100_keep", "🔓 保持 100% 满充上限 (手动切回前保持)"),
+            ):
+                r = Gtk.RadioMenuItem.new_with_label(c_group, text)
+                c_group = r.get_group()
+                r.connect("toggled", self._on_charge_toggled, key)
+                self.charge_radios[key] = r
+                self.menu.append(r)
+
+            self.chk_vooc = Gtk.CheckMenuItem(label="⚡ SUPERVOOC 50W 闪充允许 (关闭=10W 低温慢充)")
+            self.chk_vooc.connect("toggled", self._on_vooc_toggled)
+            self.menu.append(self.chk_vooc)
+
+            self.menu.append(Gtk.SeparatorMenuItem())
+
+            # 3. Physical Screen, Brightness, Torch, Refresh Rate, Vibrate
+            self.chk_screen = Gtk.CheckMenuItem(label="📱 手机物理 AMOLED 屏幕亮起 (远端可关屏防烧屏)")
+            self.chk_screen.connect("toggled", self._on_screen_toggled)
+            self.menu.append(self.chk_screen)
+
+            br_sub_item = Gtk.MenuItem(label="💡 手机物理屏亮度调节")
+            br_sub = Gtk.Menu()
+            self.br_radios: dict[int, Gtk.RadioMenuItem] = {}
+            b_group: list[Gtk.RadioMenuItem] = []
+            for pct, text in BRIGHTNESS_PRESETS:
+                r = Gtk.RadioMenuItem.new_with_label(b_group, text)
+                b_group = r.get_group()
+                r.connect("toggled", self._on_brightness_toggled, pct)
+                self.br_radios[pct] = r
+                br_sub.append(r)
+            br_sub_item.set_submenu(br_sub)
+            self.menu.append(br_sub_item)
+
+            self.chk_hbm = Gtk.CheckMenuItem(label="☀️ 阳光屏户外超亮激发 (HBM)")
+            self.chk_hbm.connect("toggled", self._on_hbm_toggled)
+            self.menu.append(self.chk_hbm)
+
+            self.chk_torch = Gtk.CheckMenuItem(label="🔦 手机后置闪光灯手电筒")
+            self.chk_torch.connect("toggled", self._on_torch_check_toggled)
+            self.menu.append(self.chk_torch)
+
+            torch_sub_item = Gtk.MenuItem(label="🔆 手电筒多档亮度")
+            torch_sub = Gtk.Menu()
+            self.torch_radios: dict[int, Gtk.RadioMenuItem] = {}
+            t_group: list[Gtk.RadioMenuItem] = []
+            for lvl, text in TORCH_PRESETS:
+                r = Gtk.RadioMenuItem.new_with_label(t_group, text)
+                t_group = r.get_group()
+                r.connect("toggled", self._on_torch_level_toggled, lvl)
+                self.torch_radios[lvl] = r
+                torch_sub.append(r)
+            torch_sub_item.set_submenu(torch_sub)
+            self.menu.append(torch_sub_item)
+
+            ref_sub_item = Gtk.MenuItem(label="🖼️ 屏幕与触控同步刷新率 (实时切换 + 持久保存)")
+            ref_sub = Gtk.Menu()
+            self.ref_radios: dict[int, Gtk.RadioMenuItem] = {}
+            rf_group: list[Gtk.RadioMenuItem] = []
+            for hz, text in (
+                (60, "60 Hz · 长续航低功耗"),
+                (90, "90 Hz · 均衡流畅"),
+                (120, "120 Hz · 原生满帧丝滑 (默认)"),
+            ):
+                r = Gtk.RadioMenuItem.new_with_label(rf_group, text)
+                rf_group = r.get_group()
+                r.connect("toggled", self._on_refresh_toggled, hz)
+                self.ref_radios[hz] = r
+                ref_sub.append(r)
+            ref_sub_item.set_submenu(ref_sub)
+            self.menu.append(ref_sub_item)
+
+            toff_sub_item = Gtk.MenuItem(label="👆 息屏触控策略 (双击亮屏防误触 / 彻底断触)")
+            toff_sub = Gtk.Menu()
+            self.toff_radios: dict[str, Gtk.RadioMenuItem] = {}
+            toff_group: list[Gtk.RadioMenuItem] = []
+            for pol_key, pol_text in (
+                ("gesture", "👆 息屏双击亮屏唤醒 + 防误触低功耗 (默认)"),
+                ("sleep", "💤 息屏彻底休眠断触 (0 功耗服务器模式)"),
+                ("active", "🔓 息屏保持全屏单点触控唤醒"),
+            ):
+                r = Gtk.RadioMenuItem.new_with_label(toff_group, pol_text)
+                toff_group = r.get_group()
+                r.connect("toggled", self._on_touch_policy_toggled, pol_key)
+                self.toff_radios[pol_key] = r
+                toff_sub.append(r)
+            toff_sub_item.set_submenu(toff_sub)
+            self.menu.append(toff_sub_item)
+
+            self.chk_glove = Gtk.CheckMenuItem(label="🧤 手套 / 湿手高灵敏触控模式")
+            self.chk_glove.connect("toggled", self._on_glove_toggled)
+            self.menu.append(self.chk_glove)
+
+            vib_item = Gtk.MenuItem(label="📳 震动手机一下 (寻机 / 测试线性马达)")
+            vib_item.connect(
+                "activate",
+                lambda _w: self._run_bg(lambda: ctl.trigger_vibrate(180), "已触发手机震动"),
+            )
+            self.menu.append(vib_item)
+
+            self.menu.append(Gtk.SeparatorMenuItem())
+
+            # 4. Remote Desktop (RDP Iris3 Hardware Encode) Quality Submenu
+            rdp_sub_item = Gtk.MenuItem(label="🖥️ 远程桌面 (RDP Iris3 硬编) 流畅度预设")
+            rdp_sub = Gtk.Menu()
+            self.rdp_radios: dict[int, Gtk.RadioMenuItem] = {}
+            rdp_group: list[Gtk.RadioMenuItem] = []
+            for preset_key, (qp, desc) in ctl.RDP_PRESETS.items():
+                r = Gtk.RadioMenuItem.new_with_label(rdp_group, desc)
+                rdp_group = r.get_group()
+                r.connect("toggled", self._on_rdp_toggled, preset_key)
+                self.rdp_radios[qp] = r
+                rdp_sub.append(r)
+            rdp_sub_item.set_submenu(rdp_sub)
+            self.menu.append(rdp_sub_item)
+
+            # 5. Server & Network Operations Submenu
+            srv_sub_item = Gtk.MenuItem(label="🌐 网络与守护服务运维")
+            srv_sub = Gtk.Menu()
+            self._managed_services = ctl.discover_managed_services()
+            self.srv_items: dict[str, tuple[Gtk.MenuItem, str, str]] = {}
+            for unit, title, act in self._managed_services:
+                verb = "重载" if act == "reload" else "重启"
+                mi = Gtk.MenuItem(label=f"• {title} — 点击{verb}")
+                mi.connect("activate", self._on_service_action, unit, title, act)
+                self.srv_items[unit] = (mi, title, act)
+                srv_sub.append(mi)
+            if self._managed_services:
+                srv_sub.append(Gtk.SeparatorMenuItem())
+
+            self.lbl_modem = Gtk.MenuItem(label="📶 5G 蜂窝基带: 读取中...", sensitive=False)
+            srv_sub.append(self.lbl_modem)
+
+            modem_heal = Gtk.MenuItem(label="📡 一键重连自愈 5G 蜂窝基带 (恢复搜网假死)")
+            modem_heal.connect(
+                "activate",
+                lambda _w: self._run_bg(
+                    lambda: subprocess.check_output(
+                        ctl.build_privileged_command([str(CTL_PATH), "modem", "recover"]), text=True
+                    ).strip(),
+                    "5G 蜂窝基带重连自愈完成",
+                ),
+            )
+            srv_sub.append(modem_heal)
+            srv_sub.append(Gtk.SeparatorMenuItem())
+
+            net_check = Gtk.MenuItem(label="🔄 立即检测 Wi-Fi ↔ 5G 外网连通性")
+            net_check.connect(
+                "activate",
+                lambda _w: self._run_bg(
+                    lambda: subprocess.check_output(
+                        ["nmcli", "networking", "connectivity", "check"], text=True
+                    ).strip(),
+                    "双网连通性检测完成",
+                ),
+            )
+            srv_sub.append(net_check)
+
+            trim_item = Gtk.MenuItem(label="🧹 立即执行 UFS 4.0 闪存 TRIM 优化")
+            trim_item.connect(
+                "activate",
+                lambda _w: self._run_bg(
+                    lambda: subprocess.check_output(
+                        ctl.build_privileged_command(["/usr/sbin/fstrim", "-av"]), text=True
+                    ).strip(),
+                    "UFS 4.0 闪存 TRIM 完成",
+                ),
+            )
+            srv_sub.append(trim_item)
+
+            sec_item = Gtk.MenuItem(label="🛡️ 巡检内核 CVE 免疫与系统安全加固状态")
+            sec_item.connect(
+                "activate",
+                lambda _w: self._run_bg(
+                    lambda: subprocess.check_output(
+                        ctl.build_privileged_command([str(CTL_PATH), "security"]), text=True
+                    ).strip(),
+                    "内核与系统安全巡检结果",
+                ),
+            )
+            srv_sub.append(sec_item)
+
+            srv_sub_item.set_submenu(srv_sub)
+            self.menu.append(srv_sub_item)
+
+            self.menu.show_all()
+
+        def _on_timer(self) -> bool:
+            self._net_tick = (self._net_tick + 1) % 5
+            self.refresh(refresh_net=(self._net_tick == 0))
+            return True
+
+        def refresh(self, *, refresh_net: bool = False) -> None:
+            status = ctl.collect_status()
+            if refresh_net or self._last_net is None:
+                self._last_net = ctl.collect_net_and_services()
+
+            self.indicator.set_icon_full(choose_indicator_icon(status), "一加 11 状态")
+            self.indicator.set_label(format_indicator_label(status), " 🚀 100% · 99°C")
+
+            l_bat, l_temp, l_mem, l_net = format_summary_lines(status, self._last_net)
+            self.lbl_bat.set_label(l_bat)
+            self.lbl_temp.set_label(l_temp)
+            self.lbl_mem.set_label(l_mem)
+            self.lbl_net.set_label(l_net)
+
+            self._updating = True
+            try:
+                perf_mode = status["perf"]["mode"]
+                if perf_mode in self.perf_radios:
+                    self.perf_radios[perf_mode].set_active(True)
+
+                end_thr = status["battery"].get("end_threshold_pct") or 80
+                if end_thr <= 80:
+                    self.charge_radios["80"].set_active(True)
+                elif not any(
+                    self.charge_radios[k].get_active() for k in ("100_6h", "100_12h", "100_keep")
+                ):
+                    self.charge_radios["100_keep"].set_active(True)
+
+                self.chk_vooc.set_active(bool(status["battery"].get("vooc_enabled")))
+
+                dpms_on = str(status["display"].get("dpms", "")).lower() == "on"
+                self.chk_screen.set_active(dpms_on)
+
+                near_br = nearest_preset(int(status["display"].get("brightness_pct") or 35), BRIGHTNESS_PRESETS)
+                if near_br in self.br_radios:
+                    self.br_radios[near_br].set_active(True)
+
+                hbm_sup = bool(status["display"].get("hbm_supported"))
+                self.chk_hbm.set_sensitive(hbm_sup)
+                self.chk_hbm.set_active(bool(status["display"].get("hbm_enabled")) if hbm_sup else False)
+                self.chk_hbm.set_label(
+                    "☀️ 阳光屏户外超亮激发 (HBM)" if hbm_sup else "☀️ 阳光屏户外超亮 (重启加载新模块后可用)"
+                )
+
+                torch_lvl = int(status["torch"].get("brightness") or 0)
+                self.chk_torch.set_active(torch_lvl > 0)
+                near_torch = 0 if torch_lvl == 0 else nearest_preset(torch_lvl, TORCH_PRESETS[1:])
+                if near_torch in self.torch_radios:
+                    self.torch_radios[near_torch].set_active(True)
+
+                cfg_hz = int(status["display"].get("configured_refresh_hz") or status["display"].get("refresh_hz") or 120)
+                if cfg_hz in self.ref_radios:
+                    self.ref_radios[cfg_hz].set_active(True)
+
+                touch_st = status.get("touch") or {}
+                off_pol = str(touch_st.get("off_policy") or "gesture")
+                if off_pol in self.toff_radios:
+                    self.toff_radios[off_pol].set_active(True)
+                glove_sup = bool(touch_st.get("glove_supported"))
+                self.chk_glove.set_sensitive(glove_sup)
+                self.chk_glove.set_active(bool(touch_st.get("glove_enabled")) if glove_sup else False)
+
+                qp = int(status.get("rdp_vaapi_qp") or 22)
+                near_qp = min(self.rdp_radios.keys(), key=lambda k: abs(k - qp))
+                self.rdp_radios[near_qp].set_active(True)
+
+                if self._last_net:
+                    mdm = self._last_net.get("modem") or {}
+                    if mdm.get("present"):
+                        carrier = mdm.get("operator_name") or mdm.get("operator_code") or "蜂窝"
+                        sig = f" · {mdm['signal_pct']}%" if mdm.get("signal_pct") is not None else ""
+                        rat = f" ({mdm['access_tech']})" if mdm.get("access_tech") else ""
+                        self.lbl_modem.set_label(
+                            f"📶 5G 基带: {carrier} · {mdm.get('state', '?')}{rat}{sig}"
+                        )
+                    else:
+                        self.lbl_modem.set_label("📶 5G 基带: 未检测到调制解调器")
+
+                    svcs = self._last_net.get("services") or {}
+                    for unit, (mi, title, act) in self.srv_items.items():
+                        key = unit.removesuffix(".service")
+                        ok = svcs.get(key) == "active"
+                        mark = "✓ 运行中" if ok else f"✗ {svcs.get(key, '未知')}"
+                        verb = "重载" if act == "reload" else "重启"
+                        mi.set_label(f"{mark} · {title} (点击{verb})")
+            finally:
+                self._updating = False
+
+        def _on_perf_toggled(self, widget: Gtk.RadioMenuItem, mode: str) -> None:
+            if self._updating or not widget.get_active():
+                return
+            try:
+                info = ctl.set_perf_profile(mode)
+                self._notify("已切换性能模式", info["label"])
+            except Exception as exc:  # noqa: BLE001
+                self._notify("切换性能模式失败", str(exc))
+            self.refresh()
+
+        def _on_charge_toggled(self, widget: Gtk.RadioMenuItem, key: str) -> None:
+            if self._updating or not widget.get_active():
+                return
+            if key == "80":
+                args = ["charge", "80"]
+                title = "已恢复 75–80% 日常护航限充"
+            elif key == "100_6h":
+                args = ["charge", "100", "--hours", "6"]
+                title = "已开启 100% 满充（6 小时后自动恢复 80%）"
+            elif key == "100_12h":
+                args = ["charge", "100", "--hours", "12"]
+                title = "已开启 100% 满充（12 小时后自动恢复 80%）"
+            else:
+                args = ["charge", "100"]
+                title = "已设为 100% 满充上限"
+            self._run_bg(
+                lambda: subprocess.check_output([str(CTL_PATH), *args], text=True).strip(),
+                title,
+            )
+
+        def _on_vooc_toggled(self, widget: Gtk.CheckMenuItem) -> None:
+            if self._updating:
+                return
+            try:
+                st = ctl.set_vooc_state("on" if widget.get_active() else "off")
+                self._notify(
+                    "已开启 SUPERVOOC 50W 闪充模式" if st["enabled"] else "已切换为 10W 夜间低温慢充模式"
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._notify("切换快充模式失败", str(exc))
+            self.refresh()
+
+        def _on_touch_policy_toggled(self, widget: Gtk.RadioMenuItem, policy: str) -> None:
+            if self._updating or not widget.get_active():
+                return
+            try:
+                st = ctl.set_touch_off_policy(policy)
+                self._notify("已更新息屏触控策略", st["off_policy_label"])
+            except Exception as exc:  # noqa: BLE001
+                self._notify("更新息屏触控策略失败", str(exc))
+            self.refresh()
+
+        def _on_glove_toggled(self, widget: Gtk.CheckMenuItem) -> None:
+            if self._updating:
+                return
+            try:
+                on = ctl.set_touch_glove("on" if widget.get_active() else "off")
+                self._notify("已开启手套高灵敏触控" if on else "已关闭手套高灵敏触控")
+            except Exception as exc:  # noqa: BLE001
+                self._notify("切换手套触控失败", str(exc))
+            self.refresh()
+
+        def _on_screen_toggled(self, widget: Gtk.CheckMenuItem) -> None:
+            if self._updating:
+                return
+            target = "on" if widget.get_active() else "off"
+            title = "已点亮手机物理屏幕" if target == "on" else "已熄灭手机物理屏幕"
+            self._run_bg(
+                lambda: subprocess.check_output(
+                    ctl.build_privileged_command([str(CTL_PATH), "screen", target]), text=True
+                ).strip(),
+                title,
+            )
+
+        def _on_brightness_toggled(self, widget: Gtk.RadioMenuItem, pct: int) -> None:
+            if self._updating or not widget.get_active():
+                return
+            try:
+                ctl.set_brightness(f"{pct}%")
+            except Exception as exc:  # noqa: BLE001
+                self._notify("调节物理屏亮度失败", str(exc))
+            self.refresh()
+
+        def _on_hbm_toggled(self, widget: Gtk.CheckMenuItem) -> None:
+            if self._updating:
+                return
+            try:
+                state = ctl.set_hbm_state("on" if widget.get_active() else "off")
+                self._notify("已开启阳光屏户外超亮模式" if state else "已退出阳光屏超亮模式")
+            except Exception as exc:  # noqa: BLE001
+                self._notify("切换阳光屏 HBM 失败", str(exc))
+            self.refresh()
+
+        def _on_torch_check_toggled(self, widget: Gtk.CheckMenuItem) -> None:
+            if self._updating:
+                return
+            try:
+                ctl.set_torch("on" if widget.get_active() else "off")
+            except Exception as exc:  # noqa: BLE001
+                self._notify("手电筒切换失败", str(exc))
+            self.refresh()
+
+        def _on_torch_level_toggled(self, widget: Gtk.RadioMenuItem, level: int) -> None:
+            if self._updating or not widget.get_active():
+                return
+            try:
+                ctl.set_torch("off" if level == 0 else str(level))
+            except Exception as exc:  # noqa: BLE001
+                self._notify("调节手电筒亮度失败", str(exc))
+            self.refresh()
+
+        def _on_refresh_toggled(self, widget: Gtk.RadioMenuItem, hz: int) -> None:
+            if self._updating or not widget.get_active():
+                return
+            self._run_bg(
+                lambda: subprocess.check_output(
+                    ctl.build_privileged_command([str(CTL_PATH), "refresh", str(hz)]), text=True
+                ).strip(),
+                f"屏幕与触控已同步设为 {hz} Hz",
+            )
+
+        def _on_rdp_toggled(self, widget: Gtk.RadioMenuItem, preset_key: str) -> None:
+            if self._updating or not widget.get_active():
+                return
+            try:
+                _qp, desc = ctl.set_rdp_qp(preset_key)
+                self._notify("已更新远程桌面硬编预设", f"{desc}（下次重连生效）")
+            except Exception as exc:  # noqa: BLE001
+                self._notify("设置 RDP 画质失败", str(exc))
+            self.refresh()
+
+        def _on_service_action(self, _widget: Gtk.MenuItem, unit: str, title: str, act: str) -> None:
+            verb = "重载" if act == "reload" else "重启"
+            self._run_bg(
+                lambda: subprocess.check_call(
+                    ctl.build_privileged_command(["/usr/bin/systemctl", act, unit])
+                )
+                or f"{title} 已完成{verb}",
+                f"已{verb} {title}",
+            )
+
+    SalamiTrayApp()
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(run_tray())

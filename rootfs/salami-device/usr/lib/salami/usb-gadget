@@ -1,0 +1,33 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# USB NCM gadget for both the installed system and the RAM shell (initramfs/init), so the host
+# keeps one profile. Runs under BusyBox sh there.
+set -eu
+g=/sys/kernel/config/usb_gadget/salami
+[ -e "$g/UDC" ] && [ -n "$(cat "$g/UDC")" ] && exit 0
+mkdir -p "$g"
+echo 0x1d6b > "$g/idVendor"
+echo 0x0104 > "$g/idProduct"
+echo 0x0200 > "$g/bcdUSB"
+echo 0x0100 > "$g/bcdDevice"
+echo 0xef > "$g/bDeviceClass"
+echo 0x02 > "$g/bDeviceSubClass"
+echo 0x01 > "$g/bDeviceProtocol"
+mkdir -p "$g/strings/0x409" "$g/configs/c.1/strings/0x409"
+echo salami > "$g/strings/0x409/serialnumber"
+echo Linux > "$g/strings/0x409/manufacturer"
+echo 'OnePlus 11 Linux' > "$g/strings/0x409/product"
+echo 'USB NCM' > "$g/configs/c.1/strings/0x409/configuration"
+echo 250 > "$g/configs/c.1/MaxPower"
+mkdir -p "$g/functions/ncm.usb0"
+echo 02:00:00:00:77:02 > "$g/functions/ncm.usb0/dev_addr"
+echo 02:00:00:00:77:10 > "$g/functions/ncm.usb0/host_addr"
+[ -e "$g/configs/c.1/ncm.usb0" ] || ln -s "$g/functions/ncm.usb0" "$g/configs/c.1/ncm.usb0"
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    set -- /sys/class/udc/*
+    [ -e "$1" ] && break
+    sleep 1
+done
+[ -e "$1" ] || { echo 'USB controller did not register' >&2; exit 1; }
+[ "$#" -eq 1 ] || { echo 'More than one USB controller' >&2; exit 1; }
+echo "${1##*/}" > "$g/UDC"

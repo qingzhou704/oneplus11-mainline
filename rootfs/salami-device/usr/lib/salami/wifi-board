@@ -1,0 +1,50 @@
+#!/usr/bin/python3
+# The WCN7850 here reports board id 0xff, and the phone's own board data (modem_a
+# kiwi/bdwlan.elf) crashes the linux-firmware WLAN firmware while it is downloaded.
+# Serve the Qualcomm reference phone's (QRD) board data and the generic regdb from
+# linux-firmware under this board's name instead.
+# ponytail: generic calibration; replace once the phone's own board data loads.
+import struct, subprocess, sys
+sys.dont_write_bytecode = True
+
+src = '/usr/lib/firmware/ath12k/WCN7850/hw2.0/board-2.bin.zst'
+dst = '/usr/lib/firmware/updates/ath12k/WCN7850/hw2.0/board-2.bin'
+pre = 'bus=pci,vendor=17cb,device=1107,subsystem-vendor=17cb,'
+qrd = pre + 'subsystem-device=3378,qmi-chip-id=2,qmi-board-id=255'
+ours = pre + 'subsystem-device=1107,qmi-chip-id=2,qmi-board-id=255'
+magic = b'QCA-ATH12K-BOARD\0'
+
+d = subprocess.run(['zstd', '-dc', src], check=True, capture_output=True).stdout
+# Not assert: run_under -O would drop that check and leave garbage accepted.
+if not d.startswith(magic):
+    sys.exit('wifi-board: ' + src + ' is not an ath12k board file')
+# One record may carry several names (an alias followed by the data); the kernel accepts it if
+# any name matches, so register the data under every name instead of only the last one.
+found = {}
+o = (len(magic) + 3) & ~3
+while o + 8 <= len(d):
+    kind, n = struct.unpack_from('<II', d, o)
+    body, o = d[o + 8:o + 8 + n], o + 8 + ((n + 3) & ~3)
+    p, names, data = 0, [], None
+    while p + 8 <= len(body):
+        i, m = struct.unpack_from('<II', body, p)
+        v, p = body[p + 8:p + 8 + m], p + 8 + ((m + 3) & ~3)
+        if i == 0:
+            names.append(v.decode())
+        elif i == 1:
+            data = v
+    for name in names:
+        found[kind, name] = data
+board, regdb = found.get((0, qrd)), found.get((1, 'bus=pci'))
+if not board or not regdb:
+    sys.exit('wifi-board: reference board data or regdb missing in ' + src)
+
+def ie(i, b):
+    return struct.pack('<II', i, len(b)) + b + b'\0' * (-len(b) % 4)
+
+out = magic + b'\0' * (-len(magic) % 4)
+out += ie(0, ie(0, ours.encode()) + ie(1, board)) + ie(1, ie(0, ours.encode()) + ie(1, regdb))
+subprocess.run(['mkdir', '-p', dst.rsplit('/', 1)[0]], check=True)
+with open(dst + '.tmp', 'wb') as f:
+    f.write(out)
+subprocess.run(['mv', dst + '.tmp', dst], check=True)

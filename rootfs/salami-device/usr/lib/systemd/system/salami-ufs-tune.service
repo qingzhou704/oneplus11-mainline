@@ -1,0 +1,13 @@
+[Unit]
+Description=Apply OnePlus 11 UFS 4.0 queue tuning across all LUNs
+DefaultDependencies=no
+After=local-fs.target systemd-udev-settle.service
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/salami/ufs-tune
+
+[Install]
+WantedBy=multi-user.target

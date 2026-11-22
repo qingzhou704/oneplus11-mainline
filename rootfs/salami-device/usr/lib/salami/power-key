@@ -1,0 +1,516 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""Handle OnePlus 11 power button short press (blank/wake) and long press (shutdown prompt)."""
+
+from __future__ import annotations
+
+import errno
+import fcntl
+import os
+import pathlib
+import pwd
+import re
+import select
+import selectors
+import signal
+import struct
+import subprocess
+import sys
+import time
+from typing import Protocol
+
+sys.dont_write_bytecode = True
+
+DEFAULT_TOUCH_POWER_MODE = pathlib.Path("/sys/module/synaptics_tcm_i2c/parameters/power_mode")
+DEFAULT_TOUCH_OFF_POLICY = pathlib.Path("/var/lib/salami/touch-screen-off-mode")
+DEFAULT_DRM_DIR = pathlib.Path("/sys/class/drm")
+VALID_TOUCH_MODES = ("active", "gesture", "sleep")
+
+
+class TouchPolicySync:
+    """Keep Synaptics S3908 touch controller aligned with physical DSI DPMS state."""
+
+    def __init__(
+        self,
+        *,
+        power_mode_param: pathlib.Path = DEFAULT_TOUCH_POWER_MODE,
+        off_policy_file: pathlib.Path = DEFAULT_TOUCH_OFF_POLICY,
+        drm_dir: pathlib.Path = DEFAULT_DRM_DIR,
+    ) -> None:
+        self.power_mode_param = power_mode_param
+        self.off_policy_file = off_policy_file
+        self.drm_dir = drm_dir
+        self._last_applied: str | None = None
+
+    def read_off_policy(self) -> str:
+        try:
+            raw = self.off_policy_file.read_text(encoding="utf-8", errors="ignore").strip().lower()
+            if raw in VALID_TOUCH_MODES:
+                return raw
+        except OSError:
+            pass
+        return "gesture"
+
+    def is_dsi_off(self) -> bool | None:
+        if not self.drm_dir.is_dir():
+            return None
+        for dsi in sorted(self.drm_dir.glob("card*-DSI-1/dpms")):
+            try:
+                val = dsi.read_text(encoding="utf-8", errors="ignore").strip().lower()
+                if val:
+                    return val != "on"
+            except OSError:
+                continue
+        return None
+
+    def apply_for_screen_off(self, screen_off: bool, *, force: bool = False) -> str | None:
+        if not self.power_mode_param.is_file():
+            return None
+        target = self.read_off_policy() if screen_off else "active"
+        if not force and self._last_applied == target:
+            return target
+        try:
+            cur = self.power_mode_param.read_text(encoding="utf-8", errors="ignore").strip().lower()
+            if cur != target:
+                self.power_mode_param.write_text(f"{target}\n", encoding="utf-8")
+            self._last_applied = target
+            return target
+        except OSError:
+            return None
+
+    def poll_sync(self) -> float:
+        """Synchronize touch controller with DSI DPMS and return next poll interval in seconds."""
+        dsi_off = self.is_dsi_off()
+        if dsi_off is not None:
+            self.apply_for_screen_off(dsi_off)
+            return 1.0 if dsi_off else 3.0
+        return 3.0
+
+EV_SYN = 0
+SYN_REPORT = 0
+EV_KEY = 1
+KEY_POWER = 116
+KEY_WAKEUP = 143
+EVENT_STRUCT = struct.Struct("llHHi")
+EVENT_SIZE = EVENT_STRUCT.size
+EVIOCGRAB = 0x40044590
+BUS_VIRTUAL = 0x06
+UI_DEV_CREATE = 0x5501
+UI_DEV_DESTROY = 0x5502
+UI_DEV_SETUP = 0x405C5503
+UI_SET_EVBIT = 0x40045564
+UI_SET_KEYBIT = 0x40045565
+UINPUT_SETUP_STRUCT = struct.Struct("4H80sI")
+WAKE_DEV_NAME = b"salami-power-wakeup"
+DEFAULT_LONG_PRESS_S = 0.75
+PWRKEY_NAME = "pmic_pwrkey"
+
+_ACTIVE_SESSION_RE = re.compile(r'"(/org/freedesktop/login1/session/[^"]+)"')
+_USER_PROP_RE = re.compile(r'\(uo\)\s+(\d+)\s+"')
+_STRING_PROP_RE = re.compile(r's\s+"([^"]*)"')
+
+
+class WakeEmitter(Protocol):
+    def emit_wakeup(self) -> None: ...
+
+
+class UInputWakeDevice:
+    """Persistent virtual KEY_WAKEUP input device to wake seat0 without unlocking."""
+
+    def __init__(self, path: str = "/dev/uinput") -> None:
+        self.path = path
+        self._fd: int | None = None
+        self._created = False
+
+    def open(self) -> None:
+        if self._fd is not None:
+            return
+        fd = os.open(self.path, os.O_WRONLY | os.O_NONBLOCK)
+        try:
+            fcntl.ioctl(fd, UI_SET_EVBIT, EV_KEY)
+            fcntl.ioctl(fd, UI_SET_KEYBIT, KEY_WAKEUP)
+            setup = UINPUT_SETUP_STRUCT.pack(BUS_VIRTUAL, 0, 0, 1, WAKE_DEV_NAME, 0)
+            fcntl.ioctl(fd, UI_DEV_SETUP, setup)
+            fcntl.ioctl(fd, UI_DEV_CREATE)
+        except BaseException:
+            os.close(fd)
+            raise
+        self._fd = fd
+        self._created = True
+
+    def emit_wakeup(self) -> None:
+        try:
+            if self._fd is None:
+                self.open()
+            assert self._fd is not None
+            events = b"".join(
+                EVENT_STRUCT.pack(0, 0, ev_type, code, value)
+                for ev_type, code, value in (
+                    (EV_KEY, KEY_WAKEUP, 1),
+                    (EV_SYN, SYN_REPORT, 0),
+                    (EV_KEY, KEY_WAKEUP, 0),
+                    (EV_SYN, SYN_REPORT, 0),
+                )
+            )
+            os.write(self._fd, events)
+        except OSError as exc:
+            print(f"salami-power-key: uinput wakeup failed: {exc}", file=sys.stderr)
+
+    def close(self) -> None:
+        fd = self._fd
+        created = self._created
+        self._fd = None
+        self._created = False
+        if fd is not None:
+            if created:
+                try:
+                    fcntl.ioctl(fd, UI_DEV_DESTROY)
+                except OSError:
+                    pass
+            os.close(fd)
+
+
+class ScreenBackend(Protocol):
+    def is_screen_off(self) -> bool: ...
+    def wake_screen(self) -> None: ...
+    def blank_screen(self) -> None: ...
+    def prompt_power_off(self) -> None: ...
+
+
+class PowerKeyController:
+    """State machine mapping short press to screen toggle and long press to shutdown dialog."""
+
+    def __init__(self, backend: ScreenBackend, *, long_press_s: float = DEFAULT_LONG_PRESS_S) -> None:
+        self.backend = backend
+        self.long_press_s = long_press_s
+        self._pressed = False
+        self._press_deadline: float | None = None
+        self._woke_on_press = False
+        self._long_handled = False
+
+    def next_deadline(self) -> float | None:
+        if self._pressed and not self._long_handled:
+            return self._press_deadline
+        return None
+
+    def on_key_event(self, value: int, now: float) -> None:
+        if value == 2:
+            return
+        if value == 1:
+            if self._pressed:
+                return
+            self._pressed = True
+            self._press_deadline = now + self.long_press_s
+            self._long_handled = False
+            if self.backend.is_screen_off():
+                self.backend.wake_screen()
+                self._woke_on_press = True
+            else:
+                self._woke_on_press = False
+            return
+        if value == 0:
+            if not self._pressed:
+                return
+            should_blank = not self._long_handled and not self._woke_on_press
+            self._pressed = False
+            self._press_deadline = None
+            self._woke_on_press = False
+            self._long_handled = False
+            if should_blank:
+                self.backend.blank_screen()
+
+    def on_timeout(self, now: float) -> None:
+        if (
+            self._pressed
+            and not self._long_handled
+            and self._press_deadline is not None
+            and now >= self._press_deadline
+        ):
+            self._long_handled = True
+            self._press_deadline = None
+            self.backend.prompt_power_off()
+
+
+class Seat0GnomeBackend:
+    """Operate exclusively on the physical display seat (seat0) via logind and GNOME D-Bus."""
+
+    def __init__(
+        self,
+        wake_emitter: WakeEmitter | None = None,
+        touch_sync: TouchPolicySync | None = None,
+    ) -> None:
+        self._wake_emitter = wake_emitter
+        self._touch_sync = touch_sync
+
+    def _busctl_system(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["/usr/bin/busctl", *args],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+    def get_seat0_graphical_uid(self) -> int | None:
+        res = self._busctl_system(
+            "get-property",
+            "org.freedesktop.login1",
+            "/org/freedesktop/login1/seat/seat0",
+            "org.freedesktop.login1.Seat",
+            "ActiveSession",
+        )
+        if res.returncode != 0:
+            return None
+        match = _ACTIVE_SESSION_RE.search(res.stdout)
+        if not match:
+            return None
+        session_path = match.group(1)
+
+        user_res = self._busctl_system(
+            "get-property",
+            "org.freedesktop.login1",
+            session_path,
+            "org.freedesktop.login1.Session",
+            "User",
+        )
+        type_res = self._busctl_system(
+            "get-property",
+            "org.freedesktop.login1",
+            session_path,
+            "org.freedesktop.login1.Session",
+            "Type",
+        )
+        if user_res.returncode != 0 or type_res.returncode != 0:
+            return None
+        user_match = _USER_PROP_RE.match(user_res.stdout.strip())
+        type_match = _STRING_PROP_RE.match(type_res.stdout.strip())
+        if not user_match or not type_match:
+            return None
+        if type_match.group(1) not in ("wayland", "x11"):
+            return None
+        uid = int(user_match.group(1))
+        bus_socket = pathlib.Path(f"/run/user/{uid}/bus")
+        if not bus_socket.is_socket():
+            return None
+        return uid
+
+    def run_user_busctl(self, uid: int, *args: str) -> subprocess.CompletedProcess[str]:
+        try:
+            gid = pwd.getpwuid(uid).pw_gid
+        except KeyError:
+            gid = uid
+        env = {
+            "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{uid}/bus",
+            "XDG_RUNTIME_DIR": f"/run/user/{uid}",
+        }
+        return subprocess.run(
+            ["/usr/bin/busctl", "--user", *args],
+            user=uid,
+            group=gid,
+            extra_groups=[],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+    def is_screen_off(self) -> bool:
+        uid = self.get_seat0_graphical_uid()
+        if uid is None:
+            return False
+        res = self.run_user_busctl(
+            uid,
+            "get-property",
+            "org.gnome.Mutter.DisplayConfig",
+            "/org/gnome/Mutter/DisplayConfig",
+            "org.gnome.Mutter.DisplayConfig",
+            "PowerSaveMode",
+        )
+        if res.returncode != 0:
+            return False
+        return res.stdout.strip() != "i 0"
+
+    def wake_screen(self) -> None:
+        if self._touch_sync is not None:
+            self._touch_sync.apply_for_screen_off(False, force=True)
+        if self._wake_emitter is not None:
+            self._wake_emitter.emit_wakeup()
+        uid = self.get_seat0_graphical_uid()
+        if uid is None:
+            return
+        self.run_user_busctl(
+            uid,
+            "set-property",
+            "org.gnome.Mutter.DisplayConfig",
+            "/org/gnome/Mutter/DisplayConfig",
+            "org.gnome.Mutter.DisplayConfig",
+            "PowerSaveMode",
+            "i",
+            "0",
+        )
+
+    def blank_screen(self) -> None:
+        uid = self.get_seat0_graphical_uid()
+        if uid is not None:
+            self.run_user_busctl(
+                uid,
+                "call",
+                "org.gnome.Shell",
+                "/org/gnome/SessionManager/EndSessionDialog",
+                "org.gnome.SessionManager.EndSessionDialog",
+                "Close",
+            )
+            self.run_user_busctl(
+                uid,
+                "set-property",
+                "org.gnome.Mutter.DisplayConfig",
+                "/org/gnome/Mutter/DisplayConfig",
+                "org.gnome.Mutter.DisplayConfig",
+                "PowerSaveMode",
+                "i",
+                "3",
+            )
+        if self._touch_sync is not None:
+            self._touch_sync.apply_for_screen_off(True, force=True)
+
+    def prompt_power_off(self) -> None:
+        uid = self.get_seat0_graphical_uid()
+        if uid is None:
+            return
+        self.run_user_busctl(
+            uid,
+            "call",
+            "org.gnome.SessionManager",
+            "/org/gnome/SessionManager",
+            "org.gnome.SessionManager",
+            "Shutdown",
+        )
+
+
+def find_pwrkey_device() -> str | None:
+    sys_input = pathlib.Path("/sys/class/input")
+    if not sys_input.is_dir():
+        return None
+    for entry in sorted(sys_input.glob("event*")):
+        name_file = entry / "device" / "name"
+        try:
+            if name_file.read_text(encoding="utf-8", errors="ignore").strip() == PWRKEY_NAME:
+                dev = pathlib.Path("/dev/input") / entry.name
+                if dev.exists():
+                    return str(dev)
+        except OSError:
+            continue
+    return None
+
+
+def wait_for_pwrkey_device(attempts: int = 20, interval_s: float = 0.25) -> str:
+    for attempt in range(attempts):
+        dev = find_pwrkey_device()
+        if dev is not None:
+            return dev
+        if attempt + 1 < attempts:
+            select.select([], [], [], interval_s)
+    raise FileNotFoundError(f"input device {PWRKEY_NAME!r} not found")
+
+
+def run_event_loop(
+    fd: int,
+    controller: PowerKeyController,
+    *,
+    touch_sync: TouchPolicySync | None = None,
+) -> int:
+    running = True
+    wake_r, wake_w = os.pipe()
+    os.set_blocking(wake_r, False)
+    os.set_blocking(wake_w, False)
+    prev_wakeup_fd = -1
+
+    def _stop(_signum: int, _frame: object) -> None:
+        nonlocal running
+        running = False
+
+    prev_sigterm = signal.getsignal(signal.SIGTERM)
+    prev_sigint = signal.getsignal(signal.SIGINT)
+    selector = selectors.DefaultSelector()
+    try:
+        prev_wakeup_fd = signal.set_wakeup_fd(wake_w, warn_on_full_buffer=False)
+        signal.signal(signal.SIGTERM, _stop)
+        signal.signal(signal.SIGINT, _stop)
+        selector.register(fd, selectors.EVENT_READ)
+        selector.register(wake_r, selectors.EVENT_READ)
+        while running:
+            poll_wait = touch_sync.poll_sync() if touch_sync is not None else None
+            deadline = controller.next_deadline()
+            if deadline is not None:
+                rem = max(0.0, deadline - time.monotonic())
+                timeout: float | None = min(rem, poll_wait) if poll_wait is not None else rem
+            else:
+                timeout = poll_wait
+            try:
+                events = selector.select(timeout)
+            except InterruptedError:
+                continue
+            now = time.monotonic()
+            for key, _mask in events:
+                if key.fileobj == wake_r:
+                    try:
+                        os.read(wake_r, 64)
+                    except BlockingIOError:
+                        pass
+                    continue
+                while True:
+                    try:
+                        chunk = os.read(fd, EVENT_SIZE * 16)
+                    except BlockingIOError:
+                        break
+                    except OSError as exc:
+                        if exc.errno == errno.EINTR:
+                            continue
+                        raise
+                    if not chunk:
+                        return 1
+                    for offset in range(0, len(chunk) - (len(chunk) % EVENT_SIZE), EVENT_SIZE):
+                        _sec, _usec, ev_type, ev_code, ev_value = EVENT_STRUCT.unpack_from(chunk, offset)
+                        if ev_type == EV_KEY and ev_code == KEY_POWER:
+                            controller.on_key_event(ev_value, now)
+            if not running:
+                break
+            deadline = controller.next_deadline()
+            if deadline is not None and now >= deadline:
+                controller.on_timeout(now)
+        return 0
+    finally:
+        signal.signal(signal.SIGTERM, prev_sigterm)
+        signal.signal(signal.SIGINT, prev_sigint)
+        try:
+            signal.set_wakeup_fd(prev_wakeup_fd)
+        except (ValueError, OSError):
+            pass
+        selector.close()
+        os.close(wake_r)
+        os.close(wake_w)
+
+
+def main() -> int:
+    dev_path = wait_for_pwrkey_device()
+    fd = os.open(dev_path, os.O_RDONLY | os.O_NONBLOCK)
+    grabbed = False
+    wake_dev = UInputWakeDevice()
+    touch_sync = TouchPolicySync()
+    controller = PowerKeyController(Seat0GnomeBackend(wake_emitter=wake_dev, touch_sync=touch_sync))
+    try:
+        wake_dev.open()
+        fcntl.ioctl(fd, EVIOCGRAB, 1)
+        grabbed = True
+        return run_event_loop(fd, controller, touch_sync=touch_sync)
+    finally:
+        wake_dev.close()
+        if grabbed:
+            try:
+                fcntl.ioctl(fd, EVIOCGRAB, 0)
+            except OSError:
+                pass
+        os.close(fd)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

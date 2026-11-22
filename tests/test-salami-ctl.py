@@ -1,0 +1,387 @@
+#!/usr/bin/env python3
+"""Offline unit tests for salami-ctl hardware telemetry and safe sysfs controls."""
+from importlib.machinery import SourceFileLoader
+import importlib.util
+import io
+import json
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from unittest import mock
+from contextlib import redirect_stdout
+
+sys.dont_write_bytecode = True
+SOURCE = Path(__file__).resolve().parents[1] / "rootfs/salami-device/usr/lib/salami/salami-ctl"
+spec = importlib.util.spec_from_loader("salami_ctl", SourceFileLoader("salami_ctl", str(SOURCE)))
+salami_ctl = importlib.util.module_from_spec(spec)
+sys.modules["salami_ctl"] = salami_ctl
+spec.loader.exec_module(salami_ctl)
+
+
+class SalamiCtlTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        r = Path(self.tmp.name)
+        self.paths = salami_ctl.SysfsPaths(
+            bat_dir=r / "bat",
+            usb_dir=r / "usb",
+            vooc_param=r / "vooc",
+            vooc_cool_param=r / "vooc_cool",
+            vooc_modprobe_conf=r / "modprobe.d" / "salami-vooc.conf",
+            thermal_dir=r / "thermal",
+            cpufreq_dir=r / "cpufreq",
+            cpufreq_boost=r / "cpufreq" / "boost",
+            gpu_devfreq_dir=r / "gpu_devfreq",
+            ufs_queue_dir=r / "ufs_queue",
+            torch_dir=r / "torch",
+            backlight_dir=r / "backlight",
+            drm_dir=r / "drm",
+            panel_refresh_param=r / "refresh",
+            panel_hbm_param=r / "panel_hbm",
+            touch_refresh_param=r / "touch_refresh",
+            touch_glove_param=r / "touch_glove",
+            touch_power_mode_param=r / "touch_power_mode",
+            touch_off_policy_file=r / "salami" / "touch-screen-off-mode",
+            refresh_modprobe_conf=r / "modprobe.d" / "salami-refresh.conf",
+            zram_mm_stat=r / "zram_mm_stat",
+            proc_meminfo=r / "meminfo",
+            proc_tcp_cc=r / "tcp_cc",
+            proc_qdisc=r / "qdisc",
+            sys_input=r / "sys_input",
+            dev_input=r / "dev_input",
+            grd_env_file=r / "env.d" / "60-salami-grd.conf",
+            power_key_script=r / "fake_power_key.py",
+            services_conf=r / "salami" / "services.conf",
+            modem_guard_state=r / "run" / "modem-guard.json",
+            proc_sys_dir=r / "proc_sys",
+            cpu_vuln_dir=r / "cpu_vulns",
+        )
+        for d in (
+            self.paths.bat_dir,
+            self.paths.usb_dir,
+            self.paths.thermal_dir / "thermal_zone0",
+            self.paths.thermal_dir / "thermal_zone1",
+            self.paths.thermal_dir / "thermal_zone2",
+            self.paths.cpufreq_dir / "policy0",
+            self.paths.cpufreq_dir / "policy3",
+            self.paths.cpufreq_dir / "policy7",
+            self.paths.gpu_devfreq_dir,
+            self.paths.ufs_queue_dir,
+            self.paths.torch_dir,
+            self.paths.backlight_dir,
+            self.paths.drm_dir / "card1-DSI-1",
+            self.paths.sys_input / "event3" / "device",
+            self.paths.dev_input,
+            self.paths.touch_off_policy_file.parent,
+        ):
+            d.mkdir(parents=True, exist_ok=True)
+
+        self._write(self.paths.bat_dir / "capacity", "78")
+        self._write(self.paths.bat_dir / "status", "Charging")
+        self._write(self.paths.bat_dir / "voltage_now", "8400000")
+        self._write(self.paths.bat_dir / "current_now", "4500000")
+        self._write(self.paths.bat_dir / "power_now", "37800000")
+        self._write(self.paths.bat_dir / "temp", "345")
+        self._write(self.paths.bat_dir / "charge_control_start_threshold", "75")
+        self._write(self.paths.bat_dir / "charge_control_end_threshold", "80")
+        self._write(self.paths.bat_dir / "cycle_count", "5")
+        self._write(self.paths.bat_dir / "state_of_health", "100")
+        self._write(self.paths.usb_dir / "online", "1")
+        self._write(self.paths.usb_dir / "voltage_now", "8900000")
+        self._write(self.paths.usb_dir / "current_now", "4300000")
+        self._write(self.paths.vooc_param, "Y")
+        self._write(self.paths.vooc_cool_param, "0")
+        self._write(self.paths.touch_glove_param, "N")
+        self._write(self.paths.touch_power_mode_param, "active")
+        self._write(self.paths.touch_off_policy_file, "gesture")
+        self._write(self.paths.thermal_dir / "thermal_zone0" / "type", "cpu7-top-thermal")
+        self._write(self.paths.thermal_dir / "thermal_zone0" / "temp", "36500")
+        self._write(self.paths.thermal_dir / "thermal_zone1" / "type", "gpuss-0-thermal")
+        self._write(self.paths.thermal_dir / "thermal_zone1" / "temp", "31200")
+        self._write(self.paths.thermal_dir / "thermal_zone2" / "type", "skin-msm-thermal")
+        self._write(self.paths.thermal_dir / "thermal_zone2" / "temp", "29400")
+        for pol, hw in (("policy0", "2016000"), ("policy3", "2803200"), ("policy7", "2956800")):
+            self._write(self.paths.cpufreq_dir / pol / "scaling_governor", "schedutil")
+            self._write(self.paths.cpufreq_dir / pol / "scaling_max_freq", hw)
+            self._write(self.paths.cpufreq_dir / pol / "cpuinfo_max_freq", hw)
+        self._write(self.paths.cpufreq_boost, "0")
+        self._write(self.paths.cpufreq_dir / "policy7" / "scaling_boost_frequencies", "3187200")
+        self._write(self.paths.gpu_devfreq_dir / "min_freq", "220000000")
+        self._write(self.paths.gpu_devfreq_dir / "max_freq", "680000000")
+        self._write(self.paths.ufs_queue_dir / "scheduler", "[none] mq-deadline kyber bfq")
+        self._write(self.paths.ufs_queue_dir / "read_ahead_kb", "256")
+        self._write(self.paths.torch_dir / "brightness", "0")
+        self._write(self.paths.torch_dir / "max_brightness", "255")
+        self._write(self.paths.backlight_dir / "brightness", "628")
+        self._write(self.paths.backlight_dir / "max_brightness", "2047")
+        self._write(self.paths.drm_dir / "card1-DSI-1" / "dpms", "On")
+        self._write(self.paths.panel_refresh_param, "120")
+        self._write(self.paths.panel_hbm_param, "N")
+        self._write(self.paths.touch_refresh_param, "120")
+        self._write(self.paths.zram_mm_stat, "104857600 34952533 40000000 0 40000000 0 0 0 0")
+        self._write(self.paths.proc_meminfo, "MemTotal:       15000000 kB\nMemAvailable:   10000000 kB\n")
+        self._write(self.paths.proc_tcp_cc, "bbr")
+        self._write(self.paths.proc_qdisc, "fq")
+        self._write(self.paths.sys_input / "event3" / "device" / "name", "qcom-spmi-haptics")
+        (self.paths.dev_input / "event3").write_bytes(b"")
+
+    @staticmethod
+    def _write(path: Path, text: str) -> None:
+        path.write_text(text + "\n", encoding="utf-8")
+
+    def test_status_json_and_formatted_output(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = salami_ctl.main(["status", "--json"], self.paths)
+        self.assertEqual(rc, 0)
+        data = json.loads(buf.getvalue())
+        self.assertEqual(data["battery"]["capacity_pct"], 78)
+        self.assertEqual(data["battery"]["power_w"], 37.8)
+        self.assertTrue(data["battery"]["vooc_enabled"])
+        self.assertEqual(data["thermals_c"]["cpu_max"], 36.5)
+        self.assertEqual(data["thermals_c"]["gpu_max"], 31.2)
+        self.assertEqual(data["thermals_c"]["skin"], 29.4)
+        self.assertEqual(data["network"]["tcp_congestion_control"], "bbr")
+        self.assertEqual(data["network"]["default_qdisc"], "fq")
+        self.assertEqual(data["memory"]["zram"]["ratio"], 3.0)
+
+        buf2 = io.StringIO()
+        with redirect_stdout(buf2):
+            self.assertEqual(salami_ctl.main(["status"], self.paths), 0)
+        self.assertIn("37.80 W", buf2.getvalue())
+        self.assertIn("bbr + fq", buf2.getvalue())
+
+    def test_charge_threshold_write_order_prevents_kernel_einval(self):
+        # Track every write sequence so start_threshold is NEVER > end_threshold
+        events: list[tuple[str, int]] = []
+        start_p = self.paths.bat_dir / "charge_control_start_threshold"
+        end_p = self.paths.bat_dir / "charge_control_end_threshold"
+
+        orig_write_text = Path.write_text
+
+        def checked_write(p: Path, data: str, *args, **kwargs):
+            orig_write_text(p, data, *args, **kwargs)
+            if p in (start_p, end_p):
+                s = int(start_p.read_text())
+                e = int(end_p.read_text())
+                events.append((p.name, int(data.strip())))
+                self.assertLessEqual(s, e, f"Invalid transient state start={s} > end={e}")
+
+        with mock.patch.object(Path, "write_text", checked_write):
+            # 75/80 -> 95/100 must write end(100) BEFORE start(95)
+            self.assertEqual(salami_ctl.set_charge_limit(100, self.paths), (95, 100))
+            self.assertEqual(events, [
+                ("charge_control_end_threshold", 100),
+                ("charge_control_start_threshold", 95),
+            ])
+            events.clear()
+            # 95/100 -> 75/80 must write start(75) BEFORE end(80)
+            self.assertEqual(salami_ctl.set_charge_limit(80, self.paths), (75, 80))
+            self.assertEqual(events, [
+                ("charge_control_start_threshold", 75),
+                ("charge_control_end_threshold", 80),
+            ])
+
+        with self.assertRaises(ValueError):
+            salami_ctl.set_charge_limit(30, self.paths)
+        with self.assertRaises(ValueError):
+            salami_ctl.set_charge_limit(105, self.paths)
+
+    def test_torch_on_off_toggle_and_clamp(self):
+        self.assertEqual(salami_ctl.set_torch("toggle", None, self.paths), 64)
+        self.assertEqual(salami_ctl.set_torch("status", None, self.paths), 64)
+        self.assertEqual(salami_ctl.set_torch("toggle", None, self.paths), 0)
+        self.assertEqual(salami_ctl.set_torch("on", 500, self.paths), 255)
+        self.assertEqual(salami_ctl.set_torch("off", None, self.paths), 0)
+
+    def test_brightness_percent_relative_and_safe_floor(self):
+        raw, pct = salami_ctl.set_brightness("50%", self.paths)
+        self.assertEqual(pct, 50)
+        self.assertEqual(raw, 1024)
+        raw, pct = salami_ctl.set_brightness("+20", self.paths)
+        self.assertEqual(pct, 70)
+        raw, pct = salami_ctl.set_brightness("-99", self.paths)
+        self.assertEqual(pct, 1)
+        self.assertGreaterEqual(raw, 20)
+
+    def test_find_haptics_device(self):
+        dev = salami_ctl.find_haptics_device(self.paths)
+        self.assertEqual(dev, self.paths.dev_input / "event3")
+
+    def test_perf_modes_switch_governors_and_sm8550_opps(self):
+        self.assertEqual(salami_ctl.detect_perf_profile(self.paths)["mode"], "balanced")
+
+        gpu_min_p = self.paths.gpu_devfreq_dir / "min_freq"
+        gpu_max_p = self.paths.gpu_devfreq_dir / "max_freq"
+        orig_write = Path.write_text
+
+        def checked_gpu_write(p: Path, data: str, *args, **kwargs):
+            orig_write(p, data, *args, **kwargs)
+            if p in (gpu_min_p, gpu_max_p):
+                self.assertLessEqual(int(gpu_min_p.read_text()), int(gpu_max_p.read_text()))
+
+        with mock.patch.object(Path, "write_text", checked_gpu_write):
+            eco = salami_ctl.set_perf_profile("eco", self.paths)
+            self.assertEqual(eco["mode"], "eco")
+            self.assertEqual(eco["clusters"]["policy0"]["max_mhz"], 1555)
+            self.assertEqual(eco["clusters"]["policy3"]["max_mhz"], 1786)
+            self.assertEqual(eco["clusters"]["policy7"]["max_mhz"], 1843)
+            self.assertEqual(eco["gpu"], {"min_mhz": 220, "max_mhz": 401})
+
+            perf = salami_ctl.set_perf_profile("performance", self.paths)
+            self.assertEqual(perf["mode"], "performance")
+            self.assertTrue(perf["boost"])
+            self.assertEqual(perf["clusters"]["policy7"]["governor"], "performance")
+            self.assertEqual(perf["clusters"]["policy7"]["max_mhz"], 3187)
+            self.assertEqual(perf["gpu"], {"min_mhz": 401, "max_mhz": 680})
+
+            bal = salami_ctl.set_perf_profile("balanced", self.paths)
+            self.assertEqual(bal["mode"], "balanced")
+            self.assertFalse(bal["boost"])
+            self.assertEqual(bal["clusters"]["policy7"]["governor"], "schedutil")
+            self.assertEqual(bal["gpu"], {"min_mhz": 220, "max_mhz": 680})
+
+        with self.assertRaises(ValueError):
+            salami_ctl.set_perf_profile("turbo", self.paths)
+
+    def test_refresh_rate_atomic_sync_and_validation(self):
+        st = salami_ctl.set_refresh_rate(90, self.paths)
+        self.assertEqual(st["configured_hz"], 90)
+        self.assertTrue(st["runtime_panel_applied"])
+        self.assertTrue(st["runtime_touch_applied"])
+        self.assertEqual(st["active_panel_hz"], 90)
+        self.assertEqual(st["active_touch_hz"], 90)
+        conf = self.paths.refresh_modprobe_conf.read_text(encoding="utf-8")
+        self.assertIn("options panel_samsung_amb670yf07_iris7 refresh=90\n", conf)
+        self.assertIn("options synaptics_tcm_i2c refresh=90\n", conf)
+        with self.assertRaises(ValueError):
+            salami_ctl.set_refresh_rate(144, self.paths)
+
+    def test_sunlight_hbm_toggle(self):
+        self.assertEqual(salami_ctl.get_hbm_state(self.paths), (True, False))
+        self.assertTrue(salami_ctl.set_hbm_state("toggle", self.paths))
+        self.assertEqual(self.paths.panel_hbm_param.read_text().strip(), "1")
+        self.assertFalse(salami_ctl.set_hbm_state("off", self.paths))
+        self.assertEqual(self.paths.panel_hbm_param.read_text().strip(), "0")
+
+    def test_remote_physical_screen_control(self):
+        dpms_file = self.paths.drm_dir / "card1-DSI-1" / "dpms"
+        self.paths.power_key_script.write_text(
+            "from pathlib import Path\n"
+            f"DPMS = Path({str(dpms_file)!r})\n"
+            "class UInputWakeDevice:\n"
+            "    def open(self): pass\n"
+            "    def close(self): pass\n"
+            "class Seat0GnomeBackend:\n"
+            "    def __init__(self, wake_emitter=None): pass\n"
+            "    def is_screen_off(self): return DPMS.read_text().strip() != 'On'\n"
+            "    def wake_screen(self): DPMS.write_text('On\\n')\n"
+            "    def blank_screen(self): DPMS.write_text('Off\\n')\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(salami_ctl.control_physical_screen("status", self.paths), "On")
+        self.assertEqual(salami_ctl.control_physical_screen("off", self.paths), "Off")
+        self.assertEqual(salami_ctl.control_physical_screen("toggle", self.paths), "On")
+        self.assertEqual(salami_ctl.control_physical_screen("toggle", self.paths), "Off")
+
+    def test_custom_services_conf_parsing_and_validation(self):
+        self.paths.services_conf.parent.mkdir(parents=True, exist_ok=True)
+        self.paths.services_conf.write_text(
+            "# custom operator units\n"
+            "myapp.service | My Web App | restart\n"
+            "bad;rm.service | Evil | restart\n"
+            "other.service | InvalidVerb | stop\n",
+            encoding="utf-8",
+        )
+        with mock.patch.object(salami_ctl, "_run_cmd", return_value="disabled"):
+            entries = salami_ctl.discover_managed_services(self.paths)
+        self.assertEqual(entries, [("myapp.service", "My Web App", "restart")])
+
+    def test_rdp_qp_presets_and_bounds(self):
+        self.assertEqual(salami_ctl.get_rdp_qp(self.paths), 22)
+        qp, _ = salami_ctl.set_rdp_qp("fast", self.paths)
+        self.assertEqual(qp, 27)
+        self.assertEqual(salami_ctl.get_rdp_qp(self.paths), 27)
+        qp, _ = salami_ctl.set_rdp_qp("hq", self.paths)
+        self.assertEqual(qp, 18)
+        qp, _ = salami_ctl.set_rdp_qp("31", self.paths)
+        self.assertEqual(qp, 31)
+        with self.assertRaises(ValueError):
+            salami_ctl.set_rdp_qp("0", self.paths)
+        with self.assertRaises(ValueError):
+            salami_ctl.set_rdp_qp("55", self.paths)
+
+    def test_vooc_runtime_toggle_cool_down_and_persist(self):
+        st = salami_ctl.set_vooc_state("off", cool_down=4, persist=True, paths=self.paths)
+        self.assertFalse(st["enabled"])
+        self.assertEqual(st["cool_down"], 4)
+        self.assertEqual(st["configured"], False)
+        self.assertIn("vooc=0", self.paths.vooc_modprobe_conf.read_text(encoding="utf-8"))
+
+        st2 = salami_ctl.set_vooc_state("toggle", cool_down=0, persist=True, paths=self.paths)
+        self.assertTrue(st2["enabled"])
+        self.assertEqual(st2["cool_down"], 0)
+        self.assertEqual(st2["configured"], True)
+
+    def test_touch_glove_power_mode_and_screen_off_policy(self):
+        self.assertFalse(salami_ctl.get_touch_status(self.paths)["glove_enabled"])
+        self.assertTrue(salami_ctl.set_touch_glove("toggle", self.paths))
+        self.assertEqual(self.paths.touch_glove_param.read_text().strip(), "1")
+        self.assertEqual(salami_ctl.set_touch_power_mode("gesture", self.paths), "gesture")
+
+        # When DSI is Off, changing off-policy immediately applies to touch_power_mode_param
+        (self.paths.drm_dir / "card1-DSI-1" / "dpms").write_text("Off\n", encoding="utf-8")
+        st = salami_ctl.set_touch_off_policy("sleep", self.paths)
+        self.assertEqual(st["off_policy"], "sleep")
+        self.assertEqual(self.paths.touch_power_mode_param.read_text().strip(), "sleep")
+
+    def test_modem_guard_two_strike_recovery_and_backoff(self):
+        recover_calls = []
+
+        def fake_wedged():
+            return {
+                "present": True,
+                "state": "searching",
+                "power_state": "on",
+                "sim_present": True,
+                "ip": "",
+            }
+
+        def fake_recover():
+            recover_calls.append(1)
+            return {
+                "present": True,
+                "state": "connected",
+                "power_state": "on",
+                "sim_present": True,
+                "ip": "10.86.1.2/32",
+            }
+
+        r1 = salami_ctl.guard_modem(self.paths, now=1000.0, status_fn=fake_wedged, recover_fn=fake_recover)
+        self.assertEqual(r1["action"], "monitoring")
+        self.assertEqual(len(recover_calls), 0)
+
+        r2 = salami_ctl.guard_modem(self.paths, now=1120.0, status_fn=fake_wedged, recover_fn=fake_recover)
+        self.assertEqual(r2["action"], "recovered")
+        self.assertEqual(len(recover_calls), 1)
+        self.assertEqual(r2["guard_state"]["consecutive_stuck"], 0)
+
+    def test_security_status_audit(self):
+        for rel, expected in salami_ctl.SECURITY_SYSCTL_EXPECT:
+            p = self.paths.proc_sys_dir / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"{expected}\n", encoding="utf-8")
+        self.paths.cpu_vuln_dir.mkdir(parents=True, exist_ok=True)
+        (self.paths.cpu_vuln_dir / "spectre_v2").write_text("Mitigation: CSV2, BHB\n", encoding="utf-8")
+        (self.paths.cpu_vuln_dir / "meltdown").write_text("Not affected\n", encoding="utf-8")
+
+        sec = salami_ctl.collect_security_status(self.paths)
+        self.assertEqual(sec["sysctl_ok"], len(salami_ctl.SECURITY_SYSCTL_EXPECT))
+        self.assertEqual(sec["cpu_unmitigated"], [])
+        self.assertIn("全部就绪", salami_ctl.format_security_status(sec))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

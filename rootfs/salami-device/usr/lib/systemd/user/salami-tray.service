@@ -1,0 +1,11 @@
+[Unit]
+Description=OnePlus 11 top-bar hardware and server control tray
+PartOf=graphical-session.target
+After=graphical-session.target
+ConditionEnvironment=XDG_SESSION_CLASS=user
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/salami/salami-tray
+Restart=on-failure
+RestartSec=3

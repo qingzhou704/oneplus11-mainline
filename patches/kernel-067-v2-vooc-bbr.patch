@@ -1,0 +1,80 @@
+From 515a2223c4318660cbbeb8119c93c4fcc6754593 Mon Sep 17 00:00:00 2001
+From: OnePlus 11 mainline port <noreply@localhost>
+Date: Sat, 21 Nov 2026 10:36:11 -0500
+Subject: [PATCH] power: supply: qcom_battmgr: demote periodic SUPERVOOC status
+ to dev_dbg and enable BBR/FQ
+
+---
+ devices/salami/kernel.config        | 31 +++++++++++++++++++++++++++++
+ drivers/power/supply/qcom_battmgr.c |  2 +-
+ 2 files changed, 32 insertions(+), 1 deletion(-)
+
+diff --git a/devices/salami/kernel.config b/devices/salami/kernel.config
+index ec86c695c..79ea22609 100644
+--- a/devices/salami/kernel.config
++++ b/devices/salami/kernel.config
+@@ -36,6 +36,23 @@ CONFIG_USB_DWC3_DUAL_ROLE=y
+ # CONFIG_USB_DWC3_GADGET is not set
+ # UCSI drives the connector role; keep the same USB 2.0 PHY for both roles.
+ CONFIG_USB_ROLE_SWITCH=y
++# USB dock peripherals use upstream class drivers; data and power roles stay independent.
++CONFIG_USB_XHCI_HCD=y
++CONFIG_USB_XHCI_PLATFORM=y
++CONFIG_USB_STORAGE=y
++CONFIG_USB_UAS=m
++CONFIG_USB_HID=m
++CONFIG_HID_GENERIC=m
++CONFIG_SND_USB_AUDIO=m
++CONFIG_USB_VIDEO_CLASS=m
++CONFIG_USB_SERIAL=m
++CONFIG_USB_SERIAL_CH341=m
++CONFIG_USB_SERIAL_PL2303=m
++CONFIG_FAT_FS=y
++CONFIG_VFAT_FS=y
++CONFIG_EXFAT_FS=m
++CONFIG_NTFS3_FS=m
++CONFIG_NTFS3_LZX_XPRESS=y
+ CONFIG_USB_NET_RNDIS_HOST=m
+ CONFIG_CONFIGFS_FS=y
+ CONFIG_USB_CONFIGFS=y
+@@ -46,6 +63,9 @@ CONFIG_USB_CONFIGFS_F_FS=y
+ CONFIG_QCOM_PMIC_GLINK=m
+ CONFIG_UCSI_PMIC_GLINK=m
+ CONFIG_BATTERY_QCOM_BATTMGR=m
++# USB connector / subboard thermistors on the PMK8550 ADC.
++CONFIG_QCOM_SPMI_ADC5_GEN3=m
++CONFIG_SENSORS_IIO_HWMON=m
+ # Distribution firmware (linux-firmware) is zstd-compressed.
+ CONFIG_FW_LOADER_COMPRESS=y
+ CONFIG_FW_LOADER_COMPRESS_ZSTD=y
+@@ -53,3 +73,14 @@ CONFIG_FW_LOADER_COMPRESS_ZSTD=y
+ CONFIG_DRM_MSM=m
+ CONFIG_DRM_PANEL_SAMSUNG_AMB670YF07=m
+ CONFIG_TOUCHSCREEN_SYNAPTICS_TCM_I2C=m
++# Thermal control, volume-down GPIO key, linear motor haptics, Iris3 video codec, and CMA.
++CONFIG_KEYBOARD_GPIO=y
++CONFIG_INPUT_QCOM_SPMI_HAPTICS=m
++CONFIG_GENERIC_ADC_THERMAL=m
++CONFIG_THERMAL_STATISTICS=y
++CONFIG_VIDEO_QCOM_IRIS=m
++CONFIG_CMA_SIZE_MBYTES=128
++# BBR congestion control and Fair Queue pacing for server / tunnel / wireless links.
++CONFIG_TCP_CONG_BBR=m
++CONFIG_NET_SCH_FQ=m
++CONFIG_NET_SCH_FQ_CODEL=m
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index 0b875eeb0..a0c687766 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -2747,7 +2747,7 @@ static void qcom_battmgr_vooc_status(struct qcom_battmgr *battmgr, u32 status)
+ 	unsigned int code = status & 0xff;
+ 	unsigned int reason = (status >> 16) & 0xff;
+ 
+-	dev_info(battmgr->dev, "SUPERVOOC status %#x\n", status);
++	dev_dbg(battmgr->dev, "SUPERVOOC status %#x\n", status);
+ 
+ 	switch (code) {
+ 	case OPLUS_VOOC_PRESENT:
+-- 
+2.43.0
+

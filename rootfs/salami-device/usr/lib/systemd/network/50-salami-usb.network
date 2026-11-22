@@ -1,0 +1,20 @@
+# Direct link to the development host. No router or DNS is offered, so the
+# host keeps its own default route.
+[Match]
+MACAddress=02:00:00:00:77:02
+
+[Link]
+RequiredForOnline=no
+
+[Network]
+Address=192.168.77.2/24
+DHCPServer=yes
+IPv6AcceptRA=no
+
+[DHCPServer]
+PoolOffset=10
+PoolSize=1
+DefaultLeaseTimeSec=600
+EmitDNS=no
+EmitNTP=no
+EmitRouter=no

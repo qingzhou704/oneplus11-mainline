@@ -1,0 +1,191 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""Import this phone's GPU and video firmware from read-only vendor_a, once."""
+
+import hashlib
+import os
+from pathlib import Path
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+
+
+SUPER = "/dev/disk/by-partlabel/super"
+FIRMWARE_DIR = Path("/usr/lib/firmware/qcom/sm8550/oneplus/salami")
+FIRMWARES = (
+    ("firmware/a740_zap.mbn", "a740_zap.mbn"),
+    ("firmware/vpu30_4v.mbn", "vpu30_4v.mbn"),
+)
+
+# On-disk format constants, not this phone's partition offsets or sizes.
+# https://android.googlesource.com/platform/system/core/+/master/fs_mgr/liblp/include/liblp/metadata_format.h
+SECTOR_SIZE = 512
+RESERVED_BYTES = 4096
+GEOMETRY_BYTES = 4096
+
+
+def read_vendor_table(source):
+    """Validate primary geometry and slot-0 metadata; return vendor_a's dm table."""
+    source.seek(RESERVED_BYTES)
+    geometry = bytearray(source.read(52))
+    if len(geometry) != 52:
+        raise ValueError("Truncated liblp geometry")
+    magic, size, checksum, metadata_max, slots, block_size = struct.unpack(
+        "<II32sIII", geometry
+    )
+    if magic != 0x616C4467 or size != 52:
+        raise ValueError("Unsupported liblp geometry")
+    geometry[8:40] = bytes(32)
+    if hashlib.sha256(geometry).digest() != checksum:
+        raise ValueError("liblp geometry SHA-256 mismatch")
+    if (not slots or metadata_max < SECTOR_SIZE or metadata_max % SECTOR_SIZE
+            or block_size < SECTOR_SIZE or block_size % SECTOR_SIZE):
+        raise ValueError("Invalid liblp geometry sizes")
+
+    metadata_offset = RESERVED_BYTES + 2 * GEOMETRY_BYTES
+    source.seek(metadata_offset)
+    header = bytearray(source.read(128))
+    if len(header) != 128:
+        raise ValueError("Truncated liblp metadata header")
+    magic, major, minor, header_size = struct.unpack_from("<IHHI", header)
+    if magic != 0x414C5030 or major != 10 or minor > 2:
+        raise ValueError("Unsupported liblp metadata version")
+    if header_size != (256 if minor == 2 else 128):
+        raise ValueError("Invalid liblp metadata header size")
+    header.extend(source.read(header_size - len(header)))
+    if len(header) != header_size:
+        raise ValueError("Truncated liblp extended metadata header")
+    checksum = bytes(header[12:44])
+    header[12:44] = bytes(32)
+    if hashlib.sha256(header).digest() != checksum:
+        raise ValueError("liblp metadata header SHA-256 mismatch")
+
+    tables_size = struct.unpack_from("<I", header, 44)[0]
+    if header_size + tables_size > metadata_max:
+        raise ValueError("liblp tables exceed the metadata slot")
+    tables = source.read(tables_size)
+    if len(tables) != tables_size:
+        raise ValueError("Truncated liblp metadata tables")
+    if hashlib.sha256(tables).digest() != header[48:80]:
+        raise ValueError("liblp metadata tables SHA-256 mismatch")
+
+    descriptors = [struct.unpack_from("<III", header, offset)
+                   for offset in (80, 92, 104, 116)]
+    for (offset, count, stride), expected in zip(descriptors, (52, 24, 48, 64)):
+        if stride != expected or offset + count * stride > tables_size:
+            raise ValueError("Invalid liblp table bounds or entry size")
+
+    device_offset, device_count, _ = descriptors[3]
+    if device_count != 1:
+        raise ValueError("Only a single super block device is supported")
+    first_sector, _, _, device_size, device_name, flags = struct.unpack_from(
+        "<QIIQ36sI", tables, device_offset
+    )
+    if device_name.rstrip(b"\0") != b"super" or flags:
+        raise ValueError("Metadata does not describe an unsuffixed super device")
+    metadata_end = metadata_offset + 2 * metadata_max * slots
+    if (first_sector * SECTOR_SIZE < metadata_end
+            or first_sector * SECTOR_SIZE >= device_size
+            or device_size % SECTOR_SIZE):
+        raise ValueError("Invalid super logical data bounds")
+
+    partition_offset, partition_count, partition_stride = descriptors[0]
+    matches = []
+    for index in range(partition_count):
+        partition = struct.unpack_from(
+            "<36sIIII", tables, partition_offset + index * partition_stride
+        )
+        if partition[0].rstrip(b"\0") == b"vendor_a":
+            matches.append(partition)
+    if len(matches) != 1:
+        raise ValueError("Expected exactly one vendor_a partition")
+    _, attributes, first_extent, extent_count, group = matches[0]
+    valid_attributes = 0x1  # LP_PARTITION_ATTR_READONLY
+    if minor >= 1:
+        valid_attributes |= 0x4  # LP_PARTITION_ATTR_UPDATED
+    if attributes & ~valid_attributes:
+        raise ValueError("vendor_a has disabled, slot-suffixed or unknown attributes")
+    extent_offset, total_extents, extent_stride = descriptors[1]
+    if (not extent_count or first_extent + extent_count > total_extents
+            or group >= descriptors[2][1]):
+        raise ValueError("Invalid vendor_a extent list or group")
+
+    lines = []
+    logical_sector = 0
+    for index in range(first_extent, first_extent + extent_count):
+        length, target, start, device = struct.unpack_from(
+            "<QIQI", tables, extent_offset + index * extent_stride
+        )
+        if target != 0 or device != 0:
+            raise ValueError("vendor_a must use only linear extents on super")
+        if (not length or start < first_sector
+                or (start + length) * SECTOR_SIZE > device_size):
+            raise ValueError("vendor_a extent exceeds super data bounds")
+        lines.append(f"{logical_sector} {length} linear {SUPER} {start}")
+        logical_sector += length
+    return "\n".join(lines) + "\n"
+
+
+def copy_missing_from_mount(mountpoint, missing):
+    """Copy missing vendor_a binaries atomically without replacing existing targets."""
+    for source_rel, destination in missing:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{destination.name}-", dir=destination.parent
+        ) as staging:
+            with (mountpoint / source_rel).open("rb") as firmware:
+                shutil.copyfileobj(firmware, staging)
+            staging.flush()
+            os.fchmod(staging.fileno(), 0o644)
+            os.fsync(staging.fileno())
+            staging.seek(0)
+            digest = hashlib.sha256(staging.read()).hexdigest()
+            # Publish only a complete file, without replacing an existing target.
+            os.link(staging.name, destination)
+            print(f"{digest}  {destination}", flush=True)
+
+
+def main():
+    missing = [
+        (source_rel, FIRMWARE_DIR / filename)
+        for source_rel, filename in FIRMWARES
+        if not (FIRMWARE_DIR / filename).exists()
+    ]
+    if not missing:
+        print(f"Vendor firmware already exists; left unchanged in: {FIRMWARE_DIR}")
+        return
+
+    with open(SUPER, "rb") as source:
+        table = read_vendor_table(source)
+
+    mountpoint = Path(tempfile.mkdtemp(prefix="salami-gpu-", dir="/run"))
+    mapping = mountpoint.name
+    mapped = False
+    mounted = False
+    try:
+        subprocess.run(
+            ["dmsetup", "create", mapping, "--readonly", "--table", table],
+            check=True,
+        )
+        mapped = True
+        subprocess.run(
+            ["mount", "-t", "erofs", "-o", "ro",
+             f"/dev/mapper/{mapping}", str(mountpoint)],
+            check=True,
+        )
+        mounted = True
+        copy_missing_from_mount(mountpoint, missing)
+    finally:
+        if mounted:
+            subprocess.run(["umount", str(mountpoint)], check=True)
+        if mapped:
+            subprocess.run(["dmsetup", "remove", mapping], check=True)
+        mountpoint.rmdir()
+
+
+if __name__ == "__main__":
+    main()

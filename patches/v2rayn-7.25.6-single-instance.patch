@@ -1,0 +1,28 @@
+diff --git a/v2rayN/v2rayN.Desktop/Program.cs b/v2rayN/v2rayN.Desktop/Program.cs
+index b7e76b1..1685f51 100644
+--- a/v2rayN/v2rayN.Desktop/Program.cs
++++ b/v2rayN/v2rayN.Desktop/Program.cs
+@@ -6,6 +6,7 @@ namespace v2rayN.Desktop;
+ internal class Program
+ {
+     public static EventWaitHandle ProgramStarted;
++    private static Mutex? _singleInstanceMutex;
+ 
+     // Initialization code. Don't use any Avalonia, third-party APIs or any
+     // SynchronizationContext-reliant code before AppMain is called: things aren't initialized
+@@ -38,7 +39,14 @@ internal class Program
+         }
+         else
+         {
+-            _ = new Mutex(true, "v2rayN", out var bOnlyOneInstance);
++            bool bOnlyOneInstance;
++            _singleInstanceMutex = Utils.IsLinux()
++                ? new Mutex(true, "v2rayN", new NamedWaitHandleOptions
++                {
++                    CurrentUserOnly = true,
++                    CurrentSessionOnly = false
++                }, out bOnlyOneInstance)
++                : new Mutex(true, "v2rayN", out bOnlyOneInstance);
+             if (!bOnlyOneInstance)
+             {
+                 return false;

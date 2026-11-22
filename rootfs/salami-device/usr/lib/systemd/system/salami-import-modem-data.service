@@ -1,0 +1,17 @@
+[Unit]
+Description=Copy DSP/modem firmware and modem EFS from this phone's partitions
+ConditionPathExists=|!/usr/lib/firmware/qcom/sm8550/oneplus/salami/adsp.mdt
+ConditionPathExists=|!/usr/lib/firmware/qcom/sm8550/oneplus/salami/cdsp.mdt
+ConditionPathExists=|!/var/lib/rmtfs/modem_fs1
+ConditionPathExists=|!/var/lib/rmtfs/oem_stanvbk
+ConditionPathExists=|!/var/lib/rmtfs/oem_dycnvbk
+Requires=dev-disk-by\x2dpartlabel-modem_a.device dev-disk-by\x2dpartlabel-modemst1.device dev-disk-by\x2dpartlabel-modemst2.device dev-disk-by\x2dpartlabel-fsg.device dev-disk-by\x2dpartlabel-fsc.device dev-disk-by\x2dpartlabel-oplusstanvbk_a.device dev-disk-by\x2dpartlabel-oplusdycnvbk.device
+After=dev-disk-by\x2dpartlabel-modem_a.device dev-disk-by\x2dpartlabel-modemst1.device dev-disk-by\x2dpartlabel-modemst2.device dev-disk-by\x2dpartlabel-fsg.device dev-disk-by\x2dpartlabel-fsc.device dev-disk-by\x2dpartlabel-oplusstanvbk_a.device dev-disk-by\x2dpartlabel-oplusdycnvbk.device
+Before=rmtfs-dir.service rmtfs.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/salami/import-modem-data
+
+[Install]
+WantedBy=multi-user.target

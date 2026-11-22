@@ -1,0 +1,8 @@
+[Unit]
+Description=Self-heal OnePlus 11 X70 5G cellular registration if wedged
+After=ModemManager.service NetworkManager.service
+ConditionPathExists=/usr/lib/salami/salami-ctl
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/salami/salami-ctl modem guard

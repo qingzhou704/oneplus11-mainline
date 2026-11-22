@@ -1,0 +1,78 @@
+Description: Allow tuning VA-API H.264 CQP value via GRD_VAAPI_QP environment variable
+ Keep the upstream default pic_init_qp (22) when GRD_VAAPI_QP is unset or
+ invalid, and accept integer values in [1, 51] so high-resolution RDP links
+ over USB 2.0 can trade minor compression for lower burst bitrate when desired.
+Author: Salami Local Build
+Origin: other, optional VA-API CQP tuning for GNOME Remote Desktop 50.2
+Forwarded: no
+Last-Update: 2026-11-21
+
+--- a/src/grd-encode-session-vaapi.c
++++ b/src/grd-encode-session-vaapi.c
+@@ -46,6 +46,9 @@
+ 
+ #define MAX_HEADER_SIZE 16384
+ #define LOG2_MAX_FRAME_NUM 8
++#define DEFAULT_VAAPI_PIC_INIT_QP 22
++#define MIN_VAAPI_PIC_INIT_QP 1
++#define MAX_VAAPI_PIC_INIT_QP 51
+ 
+ /*
+  * One surface is needed, when encoding a frame,
+@@ -134,6 +137,7 @@
+   uint32_t surface_height;
+   uint32_t refresh_rate;
+   uint8_t level_idc;
++  uint8_t pic_init_qp;
+ 
+   gboolean pending_idr_frame;
+ 
+@@ -928,7 +932,7 @@
+   picture_param->last_picture = 0;
+ 
+   picture_param->frame_num = picture->frame_num;
+-  picture_param->pic_init_qp = 22;
++  picture_param->pic_init_qp = encode_session_vaapi->pic_init_qp;
+   picture_param->num_ref_idx_l0_active_minus1 = 0;
+   picture_param->num_ref_idx_l1_active_minus1 = 0;
+ 
+@@ -1890,12 +1894,39 @@
+   G_OBJECT_CLASS (grd_encode_session_vaapi_parent_class)->finalize (object);
+ }
+ 
++static uint8_t
++get_vaapi_pic_init_qp (void)
++{
++  const char *qp_env = g_getenv ("GRD_VAAPI_QP");
++  char *endptr = NULL;
++  gint64 parsed;
++
++  if (!qp_env || *qp_env == '\0')
++    return DEFAULT_VAAPI_PIC_INIT_QP;
++
++  parsed = g_ascii_strtoll (qp_env, &endptr, 10);
++  if (endptr == qp_env || *endptr != '\0' ||
++      parsed < MIN_VAAPI_PIC_INIT_QP || parsed > MAX_VAAPI_PIC_INIT_QP)
++    {
++      g_warning ("[HWAccel.VAAPI] Ignoring invalid GRD_VAAPI_QP='%s' "
++                 "(expected %u..%u), using default %u",
++                 qp_env, MIN_VAAPI_PIC_INIT_QP, MAX_VAAPI_PIC_INIT_QP,
++                 DEFAULT_VAAPI_PIC_INIT_QP);
++      return DEFAULT_VAAPI_PIC_INIT_QP;
++    }
++
++  g_message ("[HWAccel.VAAPI] Using GRD_VAAPI_QP=%u", (uint8_t) parsed);
++  return (uint8_t) parsed;
++}
++
+ static void
+ grd_encode_session_vaapi_init (GrdEncodeSessionVaapi *encode_session_vaapi)
+ {
+   if (grd_get_debug_flags () & GRD_DEBUG_VA_TIMES)
+     encode_session_vaapi->debug_va_times = TRUE;
+ 
++  encode_session_vaapi->pic_init_qp = get_vaapi_pic_init_qp ();
++
+   encode_session_vaapi->va_config = VA_INVALID_ID;
+   encode_session_vaapi->va_context = VA_INVALID_ID;
+   encode_session_vaapi->pending_idr_frame = TRUE;

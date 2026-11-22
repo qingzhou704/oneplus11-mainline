@@ -1,0 +1,114 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# OnePlus 11 initramfs: switch to the installed root (/etc/root-partlabel), or stay in RAM with a
+# USB shell. The RAM roles never mount internal storage.
+set -eu
+trap '/bin/busybox reboot -f -n' EXIT
+# Arm recovery before mounts or applet links can fail. A stalled kernel still
+# requires a hardware reset; this timer only bounds a running userspace.
+# A host that reached the shell can keep Linux up with `touch /run/keep`.
+# The maintenance image (/etc/maintenance) times out into Fastboot instead.
+(
+    /bin/busybox sleep 180
+    [ -e /run/keep ] && exit 0
+    [ -e /etc/maintenance ] && /bin/reboot-bootloader
+    /bin/busybox reboot -f -n
+) &
+timer=$!
+# BusyBox ash runs its own applets before PATH lookup; call maintenance tools that share an
+# applet name (tar, mke2fs) by absolute path.
+export PATH=/bin:/usr/sbin:/usr/bin
+/bin/busybox --install -s /bin
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+
+# Persistent image (/etc/root-partlabel): boot the installed root read-only and
+# leave remount, fsck and the USB link to it. If the root is not found or not
+# mountable the shell below runs instead, keeping the bounded timer. Failures after
+# switch_root has taken over are the new init's to handle, not this script's.
+if [ -e /etc/root-partlabel ]; then
+    label=$(cat /etc/root-partlabel)
+    root=
+    for attempt in $(seq 15); do
+        for u in /sys/class/block/*/uevent; do
+            if grep -Fqx "PARTNAME=$label" "$u"; then d=${u%/uevent}; root=/dev/${d##*/}; fi
+        done
+        [ -n "$root" ] && break
+        sleep 1
+    done
+    mkdir -p /newroot
+    if [ -n "$root" ] && mount -t ext4 -o ro "$root" /newroot; then
+        if [ -x /newroot/sbin/init ]; then
+            echo "salami: switching to $root ($label)" > /dev/kmsg
+            # A failed move still exits through the reboot trap.
+            for m in dev proc sys; do mount --move "/$m" "/newroot/$m"; done
+            # The timer may have already exited on its own; a nonzero kill must not abort here.
+            kill "$timer" || true
+            # Keep the EXIT trap: if exec cannot start the program at all, this shell is still
+            # PID 1 and would otherwise exit straight into a kernel panic. This only covers a
+            # failed exec; once switch_root has taken over, its own failures are not caught here.
+            # A good boot discards the trap with the replaced image, so the reboot path is not
+            # reachable on success.
+            exec switch_root /newroot /sbin/init
+        fi
+        umount /newroot
+    fi
+    echo "salami: root $label not usable (${root:-not found})" > /dev/kmsg
+fi
+mkdir -p /dev/pts /run /sys/kernel/config
+mount -t devpts devpts /dev/pts
+mount -t tmpfs tmpfs /run
+mkdir -p /run/evidence
+exec >/run/evidence/init.log 2>&1
+
+hostname salami-ramprobe
+uname -a > /run/evidence/uname.txt
+cat /etc/build-id > /run/evidence/build-id.txt
+cat /proc/cmdline > /run/evidence/cmdline.txt
+cat /proc/meminfo > /run/evidence/meminfo.txt
+tr '\000' '\n' < /proc/device-tree/compatible > /run/evidence/compatible.txt
+
+for disk in /dev/sd*; do
+    [ -b "$disk" ] || continue
+    blockdev --setro "$disk"
+done
+
+mount -t configfs configfs /sys/kernel/config
+# Same gadget script as the installed system (salami-device usr/lib/salami/usb-gadget).
+/bin/salami-usb-gadget
+ifconfig usb0 192.168.77.2 netmask 255.255.255.0 up
+
+cat > /run/udhcpd.conf <<'EOF'
+start 192.168.77.10
+end 192.168.77.10
+interface usb0
+option subnet 255.255.255.0
+option lease 600
+lease_file /run/udhcpd.leases
+pidfile /run/udhcpd.pid
+EOF
+
+udhcpd /run/udhcpd.conf
+if [ -e /etc/maintenance ]; then
+    # UFS LUNs appear asynchronously; every disk is read-only before the shell
+    # opens. Writing needs an explicit `blockdev --setrw` by the operator.
+    for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        [ "$(ls -d /sys/block/sd* 2>/dev/null | wc -l)" -ge 6 ] && break
+        sleep 1
+    done
+    for b in /sys/class/block/sd*; do
+        [ -e "$b" ] || continue
+        blockdev --setro "/dev/${b##*/}"
+    done
+    cat /sys/block/sd*/ro > /run/evidence/disks-ro.txt || true
+fi
+telnetd -b 192.168.77.2:2323 -l /bin/sh
+dmesg > /run/evidence/dmesg.txt
+httpd -p 192.168.77.2:8080 -h /run/evidence
+echo SALAMI_USB_SHELL_READY >/dev/kmsg
+echo SALAMI_USB_SHELL_READY
+# Stay up: returning would fire the EXIT trap (reboot to the boot slot) even when the timer
+# exited because /run/keep exists. Only the timer decides when to leave.
+while :; do sleep 3600; done

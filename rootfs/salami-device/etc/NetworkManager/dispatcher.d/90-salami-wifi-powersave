@@ -1,0 +1,8 @@
+#!/bin/sh
+# Enforce WCN7850 low-latency power_save=off even if a saved Wi-Fi connection
+# profile explicitly recorded 802-11-wireless.powersave=3.
+case "${1:-}:${2:-}" in
+    wlp*:up|wlp*:dhcp4-change|wlp*:connectivity-change)
+        /usr/sbin/iw dev "$1" set power_save off 2>/dev/null || true
+        ;;
+esac

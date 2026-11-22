@@ -1,0 +1,28 @@
+Description: Allow implicit-sync DMA-BUF buffer negotiation for RDP
+ Keep the explicit SyncTimeline offer first and add a second buffer offer
+ for producers that cannot supply syncobj timelines. Preserve DMA-BUF,
+ EGL capture, pixel format, modifier choices, and explicit-sync support.
+Author: Salami Local Build
+Origin: other, local offline diagnosis of GNOME Remote Desktop 50.2
+Forwarded: no
+Last-Update: 2026-11-07
+
+--- a/src/grd-rdp-pipewire-stream.c
++++ b/src/grd-rdp-pipewire-stream.c
+@@ -558,6 +558,16 @@ on_stream_param_changed (void                 *user_data,
+     }
+   spa_pod_builder_pop (&pod_builder.b, &buffers_frame);
+ 
++  if (use_explicit_sync)
++    {
++      grd_append_pod_offset (pod_offsets, &pod_builder.b);
++      spa_pod_builder_add_object (
++        &pod_builder.b,
++        SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
++        SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int (8, 2, 8),
++        SPA_PARAM_BUFFERS_dataType, SPA_POD_Int (allowed_buffer_types));
++    }
++
+   grd_append_pod_offset (pod_offsets, &pod_builder.b);
+   spa_pod_builder_add_object (
+     &pod_builder.b,

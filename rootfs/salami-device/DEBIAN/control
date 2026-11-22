@@ -1,0 +1,45 @@
+Package: salami-device
+Version: 0.41
+Architecture: arm64
+Maintainer: OnePlus 11 mainline port <noreply@localhost>
+Depends: systemd, systemd-zram-generator, systemd-oomd, irqbalance, rtkit, mobile-broadband-provider-info, openssh-server, python3, rmtfs (>= 1.1.1-2+salami1), zstd, linux-firmware-qualcomm-wireless, wireless-regdb, linux-firmware-qualcomm-graphics, usb-modeswitch, bluez, dmsetup, iw
+Recommends: python3-gi, gir1.2-gtk-3.0, gir1.2-ayatanaappindicator3-0.1
+Section: admin
+Priority: optional
+Description: OnePlus 11 (salami) device integration
+ USB NCM gadget with a DHCP lease for the directly attached host, an
+ optional unauthenticated root shell on that link for bring-up, SSH
+ key-only login, first-boot SSH host key generation, and marking the
+ boot slot successful in the GPT after boot. Graphical sessions preload a
+ small library that keeps llvmpipe's JIT off SVE, which the firmware disables.
+ The phone's own ADSP/CDSP/modem firmware and modem EFS are copied from its
+ partitions on first boot; rmtfs serves the EFS copies, so the modem never
+ writes the partitions. Wi-Fi uses the Qualcomm reference board data
+ from linux-firmware under this board's name and a stable per-machine MAC.
+ Active remote administrators can scan Wi-Fi and manage network connections.
+ With the matching battery driver, charging defaults to an 80 percent ceiling,
+ and the original charger may run SUPERVOOC fast charging.
+ USB modem mode switching supports the tested Huawei CDC Ethernet adapter.
+ The GPU and Iris3 video codec use this phone's signed firmware, imported from
+ read-only vendor_a, and GNOME Remote Desktop can access the hardware render node.
+ Remote-login sessions keep their virtual display active while physical
+ screen blanking remains independent.
+ Sound uses an AudioReach topology and UCM profile for the two speakers
+ and two microphones.
+ Android boot, firmware and calibration partitions remain available to system
+ services but are hidden from desktop volume lists and automatic mounting.
+ Remote administrators can switch radios via /dev/rfkill, and APT periodic
+ timers check NetworkManager online status instead of timing out on networkd.
+ Power button short presses toggle screen blanking and long presses prompt to
+ shut down. A GNOME Shell extension guards modal dialogs against an upstream
+ on-screen-keyboard null-actor exception, prevents GDM user-list overlap,
+ keeps the GDM login dialog visible across idle blanking and wake, guards
+ cellular indicator initialization, supports optional remote-greeter
+ auto-login, and provides both a top-bar AppIndicator control center
+ (salami-tray: live battery/power/temp pill plus point-and-click perf, charge
+ ceiling, physical screen DPMS/brightness, torch, refresh rate, RDP quality,
+ and server maintenance) and Quick Settings toggles. Includes salami-ctl CLI,
+ irqbalance multi-core IRQ distribution, UFS 4.0 queue tuning, Wi-Fi
+ low-latency power-save override, automatic Wi-Fi/5G WAN failover, PSI
+ early-OOM protection, 8 MiB QUIC/SMB/RDP socket buffers with BBR + FQ + PMTU
+ probing, cellular QMAP MTU 1496, and a 512 MiB journal cap.

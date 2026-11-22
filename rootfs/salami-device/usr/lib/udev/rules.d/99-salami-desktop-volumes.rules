@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Keep the phone's boot/firmware/calibration partitions out of desktop storage UI.
+# Scope this to the internal UFS controller; external USB storage is unaffected.
+SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", KERNELS=="1d84000.ufshc", ENV{ID_PART_ENTRY_NAME}!="linux_root", ENV{ID_PART_ENTRY_NAME}!="linux_home", ENV{UDISKS_IGNORE}="1", ENV{UDISKS_AUTO}="0"

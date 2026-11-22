@@ -1,0 +1,708 @@
+From a1f889dc492d39449708d3d5e540687d9d19e99b Mon Sep 17 00:00:00 2001
+From: OnePlus 11 mainline port <noreply@localhost>
+Date: Sat, 21 Nov 2026 12:08:43 -0500
+Subject: [PATCH] drm/panel: amb670yf07, input: synaptics_tcm, netfilter: add
+ runtime 60/90/120Hz switch, HBM, and nft_compat
+
+---
+ devices/salami/kernel.config                  |   7 +
+ .../gpu/drm/panel/panel-samsung-amb670yf07.c  | 310 ++++++++++++++----
+ drivers/input/touchscreen/synaptics_tcm_i2c.c | 101 ++++--
+ 3 files changed, 336 insertions(+), 82 deletions(-)
+
+diff --git a/devices/salami/kernel.config b/devices/salami/kernel.config
+index 79ea22609..e68e527dc 100644
+--- a/devices/salami/kernel.config
++++ b/devices/salami/kernel.config
+@@ -84,3 +84,10 @@ CONFIG_CMA_SIZE_MBYTES=128
+ CONFIG_TCP_CONG_BBR=m
+ CONFIG_NET_SCH_FQ=m
+ CONFIG_NET_SCH_FQ_CODEL=m
++# Netfilter compatibility modules for ufw, iptables-nft, Docker, and rate limiting.
++CONFIG_NFT_COMPAT=m
++CONFIG_NFT_CONNLIMIT=m
++CONFIG_NFT_QUOTA=m
++CONFIG_NETFILTER_XT_MATCH_LIMIT=m
++CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=m
++CONFIG_NETFILTER_XT_MATCH_CONNLIMIT=m
+diff --git a/drivers/gpu/drm/panel/panel-samsung-amb670yf07.c b/drivers/gpu/drm/panel/panel-samsung-amb670yf07.c
+index 7210d0573..3d9910e6a 100644
+--- a/drivers/gpu/drm/panel/panel-samsung-amb670yf07.c
++++ b/drivers/gpu/drm/panel/panel-samsung-amb670yf07.c
+@@ -1,11 +1,7 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /*
+- * Samsung AMB670YF07_CS on OnePlus 11 (salami), WQHD at a fixed 60, 90 or 120 Hz.
++ * Samsung AMB670YF07_CS on OnePlus 11 (salami), WQHD 60 / 90 / 120 Hz + HBM.
+  * Register sequences: Copyright (C) 2022 OPLUS Mobile Comm Corp., Ltd.
+- *
+- * Offline bring-up candidate. The upstream DSI host must preserve the complete
+- * DSC configuration below. Iris 7 must signal analog bypass after controlled
+- * reset before the panel reset sequence or any initialization command is sent.
+  */
+ 
+ #include <linux/backlight.h>
+@@ -13,10 +9,13 @@
+ #include <linux/device.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/regulator/consumer.h>
+ 
+ #include <drm/display/drm_dsc.h>
++#include <drm/drm_atomic.h>
+ #include <drm/drm_connector.h>
++#include <drm/drm_crtc.h>
+ #include <drm/drm_mipi_dsi.h>
+ #include <drm/drm_modes.h>
+ #include <drm/drm_panel.h>
+@@ -24,8 +23,13 @@
+ 
+ #include "iris7-bypass.h"
+ 
++#define AMB670YF07_HBM_LEVEL		0x0dd2
++#define AMB670YF07_TIMING_SWITCH_START	3
++#define AMB670YF07_COMMON_TAIL_CMDS	42
++
+ struct amb670yf07 {
+ 	struct drm_panel panel;
++	struct drm_connector *connector;
+ 	struct mipi_dsi_device *dsi;
+ 	struct drm_dsc_config dsc;
+ 	struct regulator_bulk_data supplies[2];
+@@ -33,7 +37,9 @@ struct amb670yf07 {
+ 	struct gpio_desc *vout_gpio;
+ 	struct gpio_desc *vsync_mux_gpio;
+ 	struct iris7_bypass *iris;
++	struct mutex lock;
+ 	const struct amb670yf07_rate *rate;
++	bool hbm;
+ };
+ 
+ struct amb670yf07_cmd {
+@@ -51,10 +57,6 @@ struct amb670yf07_cmd {
+ 
+ #include "panel-samsung-amb670yf07-data.h"
+ 
+-/*
+- * The stock wqhd_sa_* timings. The panel's rate is set by its power-on table
+- * and DRM panels do not learn the chosen mode, so the rate is fixed per boot.
+- */
+ struct amb670yf07_rate {
+ 	unsigned int hz;
+ 	unsigned int h_back_porch;
+@@ -73,23 +75,37 @@ static const struct amb670yf07_rate amb670yf07_rates[] = {
+ 	AMB_RATE(120, 57),
+ };
+ 
++static DEFINE_MUTEX(amb670yf07_active_lock);
++static struct amb670yf07 *amb670yf07_active;
++
+ static unsigned int refresh = 120;
+-module_param(refresh, uint, 0444);
+-MODULE_PARM_DESC(refresh, "Refresh rate in Hz: 60, 90 or 120 (default 120)");
++static bool hbm;
++
++static const struct amb670yf07_rate *amb670yf07_find_rate(unsigned int hz)
++{
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(amb670yf07_rates); i++)
++		if (amb670yf07_rates[i].hz == hz)
++			return &amb670yf07_rates[i];
++	return NULL;
++}
+ 
+ static struct amb670yf07 *to_amb670yf07(struct drm_panel *panel)
+ {
+ 	return container_of(panel, struct amb670yf07, panel);
+ }
+ 
+-static int amb670yf07_init(struct amb670yf07 *ctx)
++static int amb670yf07_send_cmds(struct amb670yf07 *ctx,
++				const struct amb670yf07_cmd *cmds,
++				unsigned int count, bool honor_delays)
+ {
+ 	struct mipi_dsi_device *dsi = ctx->dsi;
+ 	unsigned int i;
+ 	ssize_t ret;
+ 
+-	for (i = 0; i < ctx->rate->num_on; i++) {
+-		const struct amb670yf07_cmd *cmd = &ctx->rate->on[i];
++	for (i = 0; i < count; i++) {
++		const struct amb670yf07_cmd *cmd = &cmds[i];
+ 		struct mipi_dsi_msg msg = {
+ 			.channel = dsi->channel,
+ 			.type = cmd->type,
+@@ -98,23 +114,137 @@ static int amb670yf07_init(struct amb670yf07 *ctx)
+ 			.tx_buf = cmd->data,
+ 		};
+ 
+-		/* Preserve even the vendor's two-byte long packets. 0x40 in the
+-		 * downstream header means batching, not a panel payload byte.
+-		 * Mainline submits each packet synchronously instead.
+-		 */
+ 		ret = dsi->host->ops->transfer(dsi->host, &msg);
+ 		if (ret < 0)
+ 			return dev_err_probe(&dsi->dev, ret,
+-					     "initialization packet %u failed\n", i);
+-		/* msm returns the padded DMA packet size, including its header. */
+-		if (cmd->delay_ms)
++					     "DSI packet %u failed\n", i);
++		if (honor_delays && cmd->delay_ms)
+ 			fsleep(cmd->delay_ms * 1000);
+ 	}
++	return 0;
++}
++
++static int amb670yf07_init(struct amb670yf07 *ctx)
++{
++	int ret;
+ 
+-	dev_info(&dsi->dev, "WQHD%u initialization complete\n", ctx->rate->hz);
++	ret = amb670yf07_send_cmds(ctx, ctx->rate->on, ctx->rate->num_on, true);
++	if (ret)
++		return ret;
++	dev_info(&ctx->dsi->dev, "WQHD%u initialization complete\n", ctx->rate->hz);
+ 	return 0;
+ }
+ 
++static int amb670yf07_switch_rate_locked(struct amb670yf07 *ctx,
++					 const struct amb670yf07_rate *rate)
++{
++	unsigned int switch_cmds;
++	int ret;
++
++	if (rate->num_on <= AMB670YF07_TIMING_SWITCH_START + AMB670YF07_COMMON_TAIL_CMDS)
++		return -EINVAL;
++	switch_cmds = rate->num_on - AMB670YF07_TIMING_SWITCH_START - AMB670YF07_COMMON_TAIL_CMDS;
++	ret = amb670yf07_send_cmds(ctx, &rate->on[AMB670YF07_TIMING_SWITCH_START],
++				   switch_cmds, false);
++	if (!ret) {
++		ctx->rate = rate;
++		dev_info(&ctx->dsi->dev, "runtime timing switch to %u Hz\n", rate->hz);
++	}
++	return ret;
++}
++
++static int amb670yf07_apply_hbm_locked(struct amb670yf07 *ctx, bool enable)
++{
++	const u8 ctrl = enable ? 0xe0 : 0x20;
++	u16 level;
++	ssize_t ret;
++
++	ret = mipi_dsi_dcs_write(ctx->dsi, 0x53, &ctrl, 1);
++	if (ret < 0)
++		return (int)ret;
++	level = enable ? AMB670YF07_HBM_LEVEL :
++			 backlight_get_brightness(ctx->panel.backlight);
++	return mipi_dsi_dcs_set_display_brightness_large(ctx->dsi, level);
++}
++
++static int amb670yf07_refresh_set(const char *val, const struct kernel_param *kp)
++{
++	const struct amb670yf07_rate *rate;
++	struct amb670yf07 *ctx;
++	unsigned int hz;
++	int ret;
++
++	ret = kstrtouint(val, 10, &hz);
++	if (ret)
++		return ret;
++	rate = amb670yf07_find_rate(hz);
++	if (!rate)
++		return -EINVAL;
++
++	mutex_lock(&amb670yf07_active_lock);
++	ctx = amb670yf07_active;
++	if (ctx) {
++		mutex_lock(&ctx->lock);
++		if (ctx->panel.prepared && ctx->rate != rate)
++			ret = amb670yf07_switch_rate_locked(ctx, rate);
++		else
++			ctx->rate = rate;
++		if (!ret)
++			refresh = hz;
++		mutex_unlock(&ctx->lock);
++	} else {
++		refresh = hz;
++	}
++	mutex_unlock(&amb670yf07_active_lock);
++	return ret;
++}
++
++static const struct kernel_param_ops amb670yf07_refresh_ops = {
++	.set = amb670yf07_refresh_set,
++	.get = param_get_uint,
++};
++module_param_cb(refresh, &amb670yf07_refresh_ops, &refresh, 0644);
++MODULE_PARM_DESC(refresh, "Refresh rate in Hz: 60, 90 or 120 (runtime writable)");
++
++static int amb670yf07_hbm_set(const char *val, const struct kernel_param *kp)
++{
++	struct amb670yf07 *ctx;
++	bool enable;
++	int ret;
++
++	ret = kstrtobool(val, &enable);
++	if (ret)
++		return ret;
++
++	mutex_lock(&amb670yf07_active_lock);
++	ctx = amb670yf07_active;
++	if (ctx) {
++		mutex_lock(&ctx->lock);
++		if (ctx->panel.prepared) {
++			ret = amb670yf07_apply_hbm_locked(ctx, enable);
++			if (!ret) {
++				ctx->hbm = enable;
++				hbm = enable;
++			}
++		} else {
++			ctx->hbm = false;
++			hbm = false;
++		}
++		mutex_unlock(&ctx->lock);
++	} else {
++		hbm = false;
++	}
++	mutex_unlock(&amb670yf07_active_lock);
++	return ret;
++}
++
++static const struct kernel_param_ops amb670yf07_hbm_ops = {
++	.set = amb670yf07_hbm_set,
++	.get = param_get_bool,
++};
++module_param_cb(hbm, &amb670yf07_hbm_ops, &hbm, 0644);
++MODULE_PARM_DESC(hbm, "Outdoor Sunlight High Brightness Mode (0=normal, 1=HBM)");
++
+ static int amb670yf07_power_off(struct amb670yf07 *ctx)
+ {
+ 	int ret, err;
+@@ -130,7 +260,6 @@ static int amb670yf07_power_off(struct amb670yf07 *ctx)
+ 		if (!ret)
+ 			ret = err;
+ 	}
+-	/* Stock vddio pre-off delay, after vci has been disabled. */
+ 	usleep_range(10000, 10100);
+ 	err = regulator_disable(ctx->supplies[0].consumer);
+ 	if (err)
+@@ -141,12 +270,25 @@ static int amb670yf07_power_off(struct amb670yf07 *ctx)
+ static int amb670yf07_prepare(struct drm_panel *panel)
+ {
+ 	struct amb670yf07 *ctx = to_amb670yf07(panel);
++	const struct amb670yf07_rate *mode_rate = NULL;
+ 	int ret, err;
+ 
+-	/* Stock order: Iris rails, panel rails/vout, Iris reset, panel reset. */
++	mutex_lock(&ctx->lock);
++	if (ctx->connector && ctx->connector->state && ctx->connector->state->crtc &&
++	    ctx->connector->state->crtc->state) {
++		unsigned int vref = drm_mode_vrefresh(&ctx->connector->state->crtc->state->adjusted_mode);
++		mode_rate = amb670yf07_find_rate(vref);
++	}
++	if (mode_rate) {
++		ctx->rate = mode_rate;
++		refresh = mode_rate->hz;
++	}
++
+ 	ret = iris7_bypass_power_on(ctx->iris);
+-	if (ret)
++	if (ret) {
++		mutex_unlock(&ctx->lock);
+ 		return dev_err_probe(&ctx->dsi->dev, ret, "Iris power-on failed\n");
++	}
+ 	ret = regulator_enable(ctx->supplies[0].consumer);
+ 	if (ret)
+ 		goto iris_off;
+@@ -162,7 +304,6 @@ static int amb670yf07_prepare(struct drm_panel *panel)
+ 	ret = iris7_bypass_reset_and_wait(ctx->iris);
+ 	if (ret)
+ 		goto power_off;
+-	/* The sa timings are STANDARD_MFR: factory selects TP/TSP vsync, GPIO57=0. */
+ 	ret = gpiod_direction_output(ctx->vsync_mux_gpio, 0);
+ 	if (ret)
+ 		goto power_off;
+@@ -173,21 +314,24 @@ static int amb670yf07_prepare(struct drm_panel *panel)
+ 	usleep_range(5000, 5100);
+ 	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
+ 	usleep_range(10000, 10100);
+-	/* qcom,mdss-dsi-lp11-init / qcom,mdss-dsi-init-delay-us. */
+ 	usleep_range(1000, 1100);
+ 
+ 	ret = amb670yf07_init(ctx);
+-	if (!ret)
++	if (!ret) {
++		mutex_unlock(&ctx->lock);
+ 		return 0;
++	}
+ power_off:
+ 	err = amb670yf07_power_off(ctx);
+ 	if (err)
+ 		dev_err(&ctx->dsi->dev, "power-off after failed prepare: %d\n", err);
++	mutex_unlock(&ctx->lock);
+ 	return ret;
+ iris_off:
+ 	err = iris7_bypass_power_off(ctx->iris);
+ 	if (err)
+ 		dev_err(&ctx->dsi->dev, "Iris rollback failed: %d\n", err);
++	mutex_unlock(&ctx->lock);
+ 	return ret;
+ }
+ 
+@@ -196,11 +340,11 @@ static int amb670yf07_enable(struct drm_panel *panel)
+ 	struct amb670yf07 *ctx = to_amb670yf07(panel);
+ 	int ret;
+ 
+-	/* DRM bridge callbacks are void, so failed prepare must also gate enable. */
+ 	if (!panel->prepared)
+ 		return -EIO;
+-	/* Every stock WQHD timing emits 0x29 separately as post-on-backlight. */
++	mutex_lock(&ctx->lock);
+ 	ret = mipi_dsi_dcs_set_display_on(ctx->dsi);
++	mutex_unlock(&ctx->lock);
+ 	if (ret)
+ 		return dev_err_probe(&ctx->dsi->dev, ret, "display-on command failed\n");
+ 	dev_info(&ctx->dsi->dev, "display-on command sent\n");
+@@ -212,7 +356,11 @@ static int amb670yf07_disable(struct drm_panel *panel)
+ 	struct amb670yf07 *ctx = to_amb670yf07(panel);
+ 	int ret;
+ 
++	mutex_lock(&ctx->lock);
++	ctx->hbm = false;
++	hbm = false;
+ 	ret = mipi_dsi_dcs_set_display_off(ctx->dsi);
++	mutex_unlock(&ctx->lock);
+ 	msleep(21);
+ 	return ret;
+ }
+@@ -222,38 +370,56 @@ static int amb670yf07_unprepare(struct drm_panel *panel)
+ 	struct amb670yf07 *ctx = to_amb670yf07(panel);
+ 	int ret, err;
+ 
++	mutex_lock(&ctx->lock);
+ 	ret = mipi_dsi_dcs_enter_sleep_mode(ctx->dsi);
+ 	msleep(101);
+-	/* Stock dsi_panel_power_off waits another 2 ms before the GPIOs. */
+ 	usleep_range(2000, 2100);
+ 	err = amb670yf07_power_off(ctx);
++	mutex_unlock(&ctx->lock);
+ 	if (err)
+ 		dev_err(&ctx->dsi->dev, "power-off failed: %d\n", err);
+ 	return ret ? ret : err;
+ }
+ 
+ static int amb670yf07_get_modes(struct drm_panel *panel,
+-			       struct drm_connector *connector)
++				struct drm_connector *connector)
+ {
+-	const struct amb670yf07_rate *rate = to_amb670yf07(panel)->rate;
+-	unsigned int htotal = 1440 + 88 + 8 + rate->h_back_porch;
+-	const struct drm_display_mode mode = {
+-		.clock = htotal * (3216 + 8 + 8 + 8) * rate->hz / 1000,
+-		.hdisplay = 1440,
+-		.hsync_start = 1440 + 88,
+-		.hsync_end = 1440 + 88 + 8,
+-		.htotal = htotal,
+-		.vdisplay = 3216,
+-		.vsync_start = 3216 + 8,
+-		.vsync_end = 3216 + 8 + 8,
+-		.vtotal = 3216 + 8 + 8 + 8,
+-		.width_mm = 70,
+-		.height_mm = 156,
+-		.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
+-	};
++	struct amb670yf07 *ctx = to_amb670yf07(panel);
++	unsigned int count = 0;
++	int i;
+ 
++	ctx->connector = connector;
+ 	connector->display_info.bpc = 10;
+-	return drm_connector_helper_get_modes_fixed(connector, &mode);
++	connector->display_info.width_mm = 70;
++	connector->display_info.height_mm = 156;
++
++	for (i = ARRAY_SIZE(amb670yf07_rates) - 1; i >= 0; i--) {
++		const struct amb670yf07_rate *r = &amb670yf07_rates[i];
++		unsigned int htotal = 1440 + 88 + 8 + r->h_back_porch;
++		const struct drm_display_mode template = {
++			.clock = htotal * (3216 + 8 + 8 + 8) * r->hz / 1000,
++			.hdisplay = 1440,
++			.hsync_start = 1440 + 88,
++			.hsync_end = 1440 + 88 + 8,
++			.htotal = htotal,
++			.vdisplay = 3216,
++			.vsync_start = 3216 + 8,
++			.vsync_end = 3216 + 8 + 8,
++			.vtotal = 3216 + 8 + 8 + 8,
++			.width_mm = 70,
++			.height_mm = 156,
++			.type = DRM_MODE_TYPE_DRIVER |
++				(r == ctx->rate ? DRM_MODE_TYPE_PREFERRED : 0),
++		};
++		struct drm_display_mode *mode = drm_mode_duplicate(connector->dev, &template);
++
++		if (!mode)
++			continue;
++		drm_mode_set_name(mode);
++		drm_mode_probed_add(connector, mode);
++		count++;
++	}
++	return count;
+ }
+ 
+ static const struct drm_panel_funcs amb670yf07_panel_funcs = {
+@@ -267,16 +433,26 @@ static const struct drm_panel_funcs amb670yf07_panel_funcs = {
+ static int amb670yf07_bl_update(struct backlight_device *bl)
+ {
+ 	struct amb670yf07 *ctx = bl_get_data(bl);
+-	int ret;
++	unsigned int level = backlight_get_brightness(bl);
++	int ret = 0;
+ 
+-	if (!ctx->panel.prepared)
++	mutex_lock(&ctx->lock);
++	if (!ctx->panel.prepared) {
++		mutex_unlock(&ctx->lock);
+ 		return 0;
+-	ret = mipi_dsi_dcs_set_display_brightness_large(ctx->dsi,
+-						     backlight_get_brightness(bl));
++	}
++	if (ctx->hbm) {
++		const u8 normal_ctrl = 0x20;
++
++		mipi_dsi_dcs_write(ctx->dsi, 0x53, &normal_ctrl, 1);
++		ctx->hbm = false;
++		hbm = false;
++	}
++	ret = mipi_dsi_dcs_set_display_brightness_large(ctx->dsi, level);
++	mutex_unlock(&ctx->lock);
+ 	if (ret < 0)
+ 		return dev_err_probe(&ctx->dsi->dev, ret, "brightness command failed\n");
+-	dev_info(&ctx->dsi->dev, "brightness command sent: %u\n",
+-		 backlight_get_brightness(bl));
++	dev_dbg(&ctx->dsi->dev, "brightness command sent: %u\n", level);
+ 	return 0;
+ }
+ 
+@@ -290,20 +466,18 @@ static int amb670yf07_probe(struct mipi_dsi_device *dsi)
+ 	const struct backlight_properties props = {
+ 		.type = BACKLIGHT_RAW,
+ 		.brightness = 1433,
+-		.max_brightness = 2047, /* Stock normal range; HBM is not implemented. */
++		.max_brightness = 2047,
+ 	};
+ 	struct amb670yf07 *ctx;
+-	unsigned int i;
+ 	int ret;
+ 
+ 	ctx = devm_drm_panel_alloc(dev, struct amb670yf07, panel,
+ 				   &amb670yf07_panel_funcs, DRM_MODE_CONNECTOR_DSI);
+ 	if (IS_ERR(ctx))
+ 		return PTR_ERR(ctx);
++	mutex_init(&ctx->lock);
+ 	ctx->dsi = dsi;
+-	for (i = 0; i < ARRAY_SIZE(amb670yf07_rates); i++)
+-		if (amb670yf07_rates[i].hz == refresh)
+-			ctx->rate = &amb670yf07_rates[i];
++	ctx->rate = amb670yf07_find_rate(refresh);
+ 	if (!ctx->rate)
+ 		return dev_err_probe(dev, -EINVAL, "unsupported refresh %u Hz\n", refresh);
+ 	ctx->iris = devm_iris7_bypass_get(dev);
+@@ -346,15 +520,25 @@ static int amb670yf07_probe(struct mipi_dsi_device *dsi)
+ 		return dev_err_probe(dev, PTR_ERR(ctx->panel.backlight), "failed to create backlight\n");
+ 	drm_panel_add(&ctx->panel);
+ 	ret = devm_mipi_dsi_attach(dev, dsi);
+-	if (ret)
++	if (ret) {
+ 		drm_panel_remove(&ctx->panel);
+-	return ret;
++		return ret;
++	}
++	mutex_lock(&amb670yf07_active_lock);
++	amb670yf07_active = ctx;
++	mutex_unlock(&amb670yf07_active_lock);
++	return 0;
+ }
+ 
+ static void amb670yf07_remove(struct mipi_dsi_device *dsi)
+ {
+ 	struct amb670yf07 *ctx = mipi_dsi_get_drvdata(dsi);
+ 
++	mutex_lock(&amb670yf07_active_lock);
++	if (amb670yf07_active == ctx)
++		amb670yf07_active = NULL;
++	mutex_unlock(&amb670yf07_active_lock);
++
+ 	drm_panel_disable(&ctx->panel);
+ 	drm_panel_unprepare(&ctx->panel);
+ 	drm_panel_remove(&ctx->panel);
+@@ -376,5 +560,5 @@ static struct mipi_dsi_driver amb670yf07_driver = {
+ };
+ module_mipi_dsi_driver(amb670yf07_driver);
+ 
+-MODULE_DESCRIPTION("Samsung AMB670YF07_CS WQHD panel (salami bring-up)");
++MODULE_DESCRIPTION("Samsung AMB670YF07_CS WQHD 60/90/120Hz + HBM panel");
+ MODULE_LICENSE("GPL");
+diff --git a/drivers/input/touchscreen/synaptics_tcm_i2c.c b/drivers/input/touchscreen/synaptics_tcm_i2c.c
+index fe8d9dce0..80e1d19f1 100644
+--- a/drivers/input/touchscreen/synaptics_tcm_i2c.c
++++ b/drivers/input/touchscreen/synaptics_tcm_i2c.c
+@@ -62,8 +62,6 @@
+  * frequency must follow the display rate. Keep equal to the panel's refresh.
+  */
+ static unsigned int refresh = 120;
+-module_param(refresh, uint, 0444);
+-MODULE_PARM_DESC(refresh, "Display refresh rate in Hz: 60, 90 or 120 (default 120)");
+ 
+ #define SYNA_OBJECT_FINGER		1
+ #define SYNA_OBJECT_GLOVED_FINGER	2
+@@ -146,6 +144,7 @@ struct syna_tcm {
+ 	/* IRQ is disabled while probe/PM executes synchronous commands. */
+ 	struct mutex lock;
+ 	bool report_configured;
++	bool asleep;
+ 	unsigned int read_length;
+ 	unsigned int read_limit;
+ 	unsigned int write_limit;
+@@ -366,11 +365,80 @@ static int syna_check_app_info(struct syna_tcm *ts,
+ 	return 0;
+ }
+ 
++static DEFINE_MUTEX(syna_active_lock);
++static struct syna_tcm *syna_active_ts;
++
++static int syna_set_report_freq_locked(struct syna_tcm *ts, unsigned int hz)
++{
++	u8 frequency[3] = { SYNA_DC_REPORT_FREQUENCY, 0, 0 };
++
++	/* Stock syna_report_refresh_switch() default table: 60->1, 90->3, 120->2. */
++	switch (hz) {
++	case 60:
++		frequency[1] = 1;
++		break;
++	case 90:
++		frequency[1] = 3;
++		break;
++	case 120:
++		frequency[1] = 2;
++		break;
++	default:
++		return -EINVAL;
++	}
++	return syna_exec_command(ts, SYNA_CMD_SET_DYNAMIC_CONFIG,
++				 frequency, sizeof(frequency));
++}
++
++static int syna_refresh_set(const char *val, const struct kernel_param *kp)
++{
++	struct syna_tcm *ts;
++	unsigned int hz;
++	int ret;
++
++	ret = kstrtouint(val, 10, &hz);
++	if (ret)
++		return ret;
++	if (hz != 60 && hz != 90 && hz != 120)
++		return -EINVAL;
++
++	mutex_lock(&syna_active_lock);
++	ts = syna_active_ts;
++	if (ts) {
++		disable_irq(ts->client->irq);
++		mutex_lock(&ts->lock);
++		if (!ts->asleep && ts->report_configured)
++			ret = syna_set_report_freq_locked(ts, hz);
++		if (!ret)
++			refresh = hz;
++		mutex_unlock(&ts->lock);
++		enable_irq(ts->client->irq);
++	} else {
++		refresh = hz;
++	}
++	mutex_unlock(&syna_active_lock);
++	return ret;
++}
++
++static const struct kernel_param_ops syna_refresh_ops = {
++	.set = syna_refresh_set,
++	.get = param_get_uint,
++};
++module_param_cb(refresh, &syna_refresh_ops, &refresh, 0644);
++MODULE_PARM_DESC(refresh, "Display refresh rate in Hz: 60, 90 or 120 (runtime writable)");
++
++static void syna_clear_active(void *data)
++{
++	mutex_lock(&syna_active_lock);
++	if (syna_active_ts == data)
++		syna_active_ts = NULL;
++	mutex_unlock(&syna_active_lock);
++}
++
+ static int syna_configure_reports(struct syna_tcm *ts)
+ {
+ 	const u8 *config;
+ 	u8 report = SYNA_REPORT_TOUCH;
+-	u8 frequency[3] = { SYNA_DC_REPORT_FREQUENCY, 0, 0 };	/* id, le16 value */
+ 	int ret;
+ 
+ 	ts->report_configured = false;
+@@ -394,22 +462,7 @@ static int syna_configure_reports(struct syna_tcm *ts)
+ 		dev_err(&ts->client->dev, "touch report config readback mismatch\n");
+ 		return -EPROTO;
+ 	}
+-	/* Stock syna_report_refresh_switch() default table: 60->1, 90->3, 120->2. */
+-	switch (refresh) {
+-	case 60:
+-		frequency[1] = 1;
+-		break;
+-	case 90:
+-		frequency[1] = 3;
+-		break;
+-	case 120:
+-		frequency[1] = 2;
+-		break;
+-	default:
+-		return -EINVAL;
+-	}
+-	ret = syna_exec_command(ts, SYNA_CMD_SET_DYNAMIC_CONFIG,
+-				frequency, sizeof(frequency));
++	ret = syna_set_report_freq_locked(ts, refresh);
+ 	if (ret)
+ 		return ret;
+ 	ret = syna_exec_command(ts, SYNA_CMD_ENABLE_REPORT, &report, 1);
+@@ -647,6 +700,12 @@ static int syna_probe(struct i2c_client *client)
+ 					IRQF_ONESHOT, "synaptics-tcm-i2c", ts);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "IRQ registration failed\n");
++	mutex_lock(&syna_active_lock);
++	syna_active_ts = ts;
++	mutex_unlock(&syna_active_lock);
++	ret = devm_add_action_or_reset(dev, syna_clear_active, ts);
++	if (ret)
++		return ret;
+ 	dev_info(dev, "report config verified, %u Hz report frequency; IRQ %d enabled\n",
+ 		 refresh, client->irq);
+ 	return 0;
+@@ -661,6 +720,8 @@ static int syna_suspend(struct device *dev)
+ 	disable_irq(client->irq);
+ 	mutex_lock(&ts->lock);
+ 	ret = syna_exec_command(ts, SYNA_CMD_ENTER_DEEP_SLEEP, NULL, 0);
++	if (!ret)
++		ts->asleep = true;
+ 	syna_release_contacts(ts);
+ 	mutex_unlock(&ts->lock);
+ 	if (ret)
+@@ -694,6 +755,8 @@ static int syna_resume(struct device *dev)
+ 		goto out;
+ 	}
+ 	ret = syna_configure_reports(ts);
++	if (!ret)
++		ts->asleep = false;
+ out:
+ 	if (ret)
+ 		dev_err(dev, "resume failed, touch input unavailable: %d\n", ret);
+-- 
+2.43.0
+

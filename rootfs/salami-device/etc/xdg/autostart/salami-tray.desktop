@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=OnePlus 11 顶栏控制台
+Comment=在顶部状态栏显示电量、功率与温度，并提供一键硬件与服务器控制菜单
+Exec=/usr/bin/systemctl --user start salami-tray.service
+Icon=phone-symbolic
+Terminal=false
+NoDisplay=true
+OnlyShowIn=GNOME;Ubuntu;
+X-GNOME-Autostart-Phase=Application

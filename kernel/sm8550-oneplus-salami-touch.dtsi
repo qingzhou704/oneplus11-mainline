@@ -1,0 +1,61 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/* OnePlus 11 S3908; native coordinates are read from APP_INFO. */
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+/ {
+	vreg_touch_avdd: regulator-touch-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "touch-avdd-enable";
+		gpio = <&tlmm 10 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		/* Stock drives GPIO10 high. External rail voltage is not measured. */
+	};
+};
+
+&apps_rsc {
+	regulators-0 {
+		vreg_l4b: ldo4 {
+			regulator-name = "salami-l4b";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+		};
+	};
+};
+
+&qupv3_id_0 {
+	status = "okay";
+};
+
+&i2c4 {
+	status = "okay";
+	/* The controller defaults to 100 kHz; stock FDT has no clock-frequency. */
+	salami_touch: touchscreen@4b {
+		compatible = "syna,s3908";
+		reg = <0x4b>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <25 IRQ_TYPE_LEVEL_LOW>;
+		reset-gpios = <&tlmm 24 GPIO_ACTIVE_LOW>;
+		vdd-supply = <&vreg_l4b>;
+		avdd-supply = <&vreg_touch_avdd>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&salami_touch_irq &salami_touch_reset>;
+	};
+};
+
+&tlmm {
+	salami_touch_irq: salami-touch-irq-state {
+		pins = "gpio25";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-pull-up;
+		input-enable;
+	};
+
+	salami_touch_reset: salami-touch-reset-state {
+		pins = "gpio24";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
+};

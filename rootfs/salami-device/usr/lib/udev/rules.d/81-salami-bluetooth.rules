@@ -1,0 +1,3 @@
+# This phone's UART controller only; never apply its address to a USB adapter.
+# DEVTYPE host: each connection also adds an hciN:M link device under the controller.
+ACTION=="add", SUBSYSTEM=="bluetooth", ENV{DEVTYPE}=="host", KERNELS=="898000.serial", TAG+="systemd", ENV{SYSTEMD_WANTS}+="salami-bluetooth-address@%k.service"

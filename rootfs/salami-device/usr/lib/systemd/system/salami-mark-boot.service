@@ -1,0 +1,13 @@
+# Flashing boot_a clears its "successful" bit; set it again as Android's boot_control HAL does.
+# Ordered after the remote channels but not gated on them: a failed USB link must not burn the
+# slot's retries now that Wi-Fi also reaches the phone. Reads only when the bit is already set.
+[Unit]
+Description=Mark the boot slot successful
+After=ssh.socket salami-usb-gadget.service systemd-networkd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/salami/mark-boot-successful
+
+[Install]
+WantedBy=multi-user.target

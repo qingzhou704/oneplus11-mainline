@@ -1,0 +1,790 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * OnePlus 11 (salami, project 22811).
+ * Sources: stock-2026-11-06/fdt.dtb (883468 bytes);
+ * Perpetua f2941a66b02ad4e71ca2b219368bac57c8bf8c50 bindings.
+ */
+/dts-v1/;
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/linux-event-codes.h>
+#include <dt-bindings/leds/common.h>
+#include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+#include <dt-bindings/sound/qcom,q6dsp-lpass-ports.h>
+#include "sm8550.dtsi"
+#include "pm8550.dtsi"
+#include "pm8550b.dtsi"
+#define PMK8550VE_SID 5
+#include "pm8550ve.dtsi"
+#include "pm8550vs.dtsi"
+#include "pmk8550.dtsi"
+
+/ {
+	model = "OnePlus 11 (salami)";
+	compatible = "oneplus,salami", "qcom,sm8550";
+	chassis-type = "handset";
+	aliases {
+		serial0 = &uart14;
+	};
+
+	/* Stock fdt.dts gpio_keys/vol_up: pm8550 gpio6, KEY_VOLUMEDOWN=114 (0x72). */
+	gpio-keys {
+		compatible = "gpio-keys";
+		pinctrl-0 = <&volume_down_n>;
+		pinctrl-names = "default";
+
+		key-volume-down {
+			label = "Volume Down";
+			linux,code = <KEY_VOLUMEDOWN>;
+			gpios = <&pm8550_gpios 6 GPIO_ACTIVE_LOW>;
+			debounce-interval = <15>;
+			linux,can-disable;
+			wakeup-source;
+		};
+	};
+	/* Empty sentinel: ARM64_FDT_HANDOFF replaces reg with bootloader RAM. */
+	memory@a0000000 { reg = <0 0 0 0>; };
+	chosen {
+		bootargs = "rdinit=/init loglevel=7 panic=10 oops=panic msm.separate_gpu_kms=1";
+		fdt-handoff {
+			/* All three conditions are required by the existing schema. */
+			stock-compatible = "qcom,kalama-mtp";
+			stock-model = "Qualcomm Technologies, Inc. Kalama MTP,salami";
+			/* Observed /chosen/bootargs word, not a root property. */
+			stock-bootargs = "oplusboot.prjname=22811";
+			/* No keep-initrd: use the built-in BusyBox initramfs. */
+		};
+	};
+
+	reserved-memory {
+		/*
+		 * Kernel log across a reset, as on aston. RAM outside every stock
+		 * reservation. Write-combine (mem-type 0): a cached mapping would
+		 * lose the log in the CPU caches.
+		 */
+		ramoops@e2000000 {
+			compatible = "ramoops";
+			reg = <0 0xe2000000 0 0x200000>;
+			console-size = <0x200000>;
+			mem-type = <0>;
+		};
+	};
+
+	/*
+	 * Battery and charger live in the ADSP (stock qcom,pmic-glink with
+	 * oplus,adsp-voocphy, no AP-side charger or gauge). Stock describes
+	 * the single USB 2.0 port as dual-role; UCSI supplies its role events.
+	 */
+	pmic-glink {
+		compatible = "oneplus,sm8550-pmic-glink", "qcom,sm8550-pmic-glink",
+			     "qcom,pmic-glink";
+		/* Stock usb_temp_adc and usb_supplementary_temp_adc guard SUPERVOOC. */
+		io-channels = <&pmk8550_vadc ADC5_GEN3_AMUX2_GPIO_100K_PU(7)>,
+			      <&pmk8550_vadc ADC5_GEN3_AMUX6_THM_100K_PU(7)>;
+		io-channel-names = "usb_l", "usb_r";
+		/* Battery and USB role events must not wait for the ADC. */
+		post-init-providers = <&pmk8550_vadc>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		connector@0 {
+			compatible = "usb-c-connector";
+			reg = <0>;
+			power-role = "dual";
+			data-role = "dual";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					pmic_glink_hs_in: endpoint {
+						remote-endpoint = <&usb_1_dwc3_hs>;
+					};
+				};
+			};
+		};
+	};
+
+	/* Stock cnss chip_cfg@1 (WCN7850, 0x1107): wlan-en 80, bt-en 81, sw-ctrl 82. */
+	wcn7850-pmu {
+		compatible = "qcom,wcn7850-pmu";
+		pinctrl-0 = <&wlan_en>, <&bt_default>, <&pmk8550_sleep_clk>;
+		pinctrl-names = "default";
+		wlan-enable-gpios = <&tlmm 80 GPIO_ACTIVE_HIGH>;
+		bt-enable-gpios = <&tlmm 81 GPIO_ACTIVE_HIGH>;
+		/* Stock qcom,pmu_vreg_map. */
+		vdd-supply = <&vreg_s5g>;
+		vddio-supply = <&vreg_l15b>;
+		vddaon-supply = <&vreg_s2g>;
+		vdddig-supply = <&vreg_s4e>;
+		vddrfa1p2-supply = <&vreg_s4g>;
+		vddrfa1p8-supply = <&vreg_s6g>;
+
+		regulators {
+			vreg_pmu_rfa_cmn: ldo0 { regulator-name = "vreg_pmu_rfa_cmn"; };
+			vreg_pmu_aon_0p59: ldo1 { regulator-name = "vreg_pmu_aon_0p59"; };
+			vreg_pmu_wlcx_0p8: ldo2 { regulator-name = "vreg_pmu_wlcx_0p8"; };
+			vreg_pmu_wlmx_0p85: ldo3 { regulator-name = "vreg_pmu_wlmx_0p85"; };
+			vreg_pmu_btcmx_0p85: ldo4 { regulator-name = "vreg_pmu_btcmx_0p85"; };
+			vreg_pmu_rfa_0p8: ldo5 { regulator-name = "vreg_pmu_rfa_0p8"; };
+			vreg_pmu_rfa_1p2: ldo6 { regulator-name = "vreg_pmu_rfa_1p2"; };
+			vreg_pmu_rfa_1p8: ldo7 { regulator-name = "vreg_pmu_rfa_1p8"; };
+			vreg_pmu_pcie_0p9: ldo8 { regulator-name = "vreg_pmu_pcie_0p9"; };
+			vreg_pmu_pcie_1p8: ldo9 { regulator-name = "vreg_pmu_pcie_1p8"; };
+		};
+	};
+};
+
+/* Values from this device's fixed-clock nodes. */
+&xo_board { clock-frequency = <76800000>; };
+&sleep_clk { clock-frequency = <32000>; };
+
+/*
+ * Disable inherited example reservations; the handoff imports ALL fixed stock
+ * reservations and subtracts stock no-map regions. Keep label targets for
+ * disabled SoC devices; regions that enabled devices reference stay enabled.
+ */
+&aop_cmd_db_mem { reg = <0 0x81c60000 0 0x20000>; };
+&smem { reg = <0 0x81d00000 0 0x200000>; };
+&hyp_mem { status = "disabled"; };
+&cpusys_vm_mem { status = "disabled"; };
+&hyp_tags_mem { status = "disabled"; };
+&xbl_sc_mem { status = "disabled"; };
+&hyp_tags_reserved_mem { status = "disabled"; };
+&xbl_dt_log_merged_mem { status = "disabled"; };
+&aop_config_merged_mem { status = "disabled"; };
+&adsp_mhi_mem { status = "disabled"; };
+&global_sync_mem { status = "disabled"; };
+&tz_stat_mem { status = "disabled"; };
+&cdsp_secure_heap_mem { status = "disabled"; };
+/* mpss/ipa/adsp/rmtfs regions below stay enabled: the remoteprocs and IPA reference them. */
+&ipa_gsi_mem { status = "disabled"; };
+/* Stock GPU zap carveout; the signed shader is copied from this device's vendor. */
+&gpu_micro_code_mem { reg = <0 0x9b09a000 0 0x2000>; };
+&spss_region_mem { status = "disabled"; };
+&spu_tz_shared_mem { status = "disabled"; };
+&spu_modem_shared_mem { status = "disabled"; };
+&camera_mem { status = "disabled"; };
+&cvp_mem { status = "disabled"; };
+/* Stock adspslpi region is 0x4880000, larger than the dtsi's. */
+&adspslpi_mem { reg = <0 0x9ea00000 0 0x4880000>; };
+&tz_reserved_mem { status = "disabled"; };
+&cpucp_fw_mem { status = "disabled"; };
+&qtee_mem { status = "disabled"; };
+&ta_mem { status = "disabled"; };
+&tz_tags_mem { status = "disabled"; };
+&hwfence_shbuf { status = "disabled"; };
+&trust_ui_vm_mem { status = "disabled"; };
+&trust_ui_vm_dump { status = "disabled"; };
+&trust_ui_vm_qrtr { status = "disabled"; };
+&trust_ui_vm_vblk0_ring { status = "disabled"; };
+&trust_ui_vm_vblk1_ring { status = "disabled"; };
+&trust_ui_vm_swiotlb { status = "disabled"; };
+&oem_vm_mem { status = "disabled"; };
+&oem_vm_vblk0_ring { status = "disabled"; };
+&oem_vm_swiotlb { status = "disabled"; };
+&hyp_ext_tags_mem { status = "disabled"; };
+&hyp_ext_reserved_mem { status = "disabled"; };
+
+/*
+ * Stock RPMh resources: ldob5/15/17, ldod1, ldoe1/3, ldog1/3, smpe4, smpg2/4/5/6.
+ * Target qcom-rpmh-regulator.c maps LDO number + pmic-id to these names.
+ * No unverified parent-supply wiring is added.
+ */
+&apps_rsc {
+	regulators-0 {
+		compatible = "qcom,pm8550-rpmh-regulators";
+		qcom,pmic-id = "b";
+		/*
+		 * Stock rpmh-regulator-bobb1 (pm_humu_bob1, phandle 0x30d) supplies
+		 * cdc-vdd-mic-bias: 2 985 984..3 960 768 uV, init 2 700 000 uV.
+		 */
+		vreg_bob1: bob1 {
+			regulator-name = "salami-bob1";
+			regulator-min-microvolt = <2985984>;
+			regulator-max-microvolt = <3960768>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+		vreg_l5b: ldo5 {
+			regulator-name = "salami-l5b";
+			regulator-min-microvolt = <3104000>;
+			regulator-max-microvolt = <3104000>;
+		};
+		vreg_l15b: ldo15 {
+			regulator-name = "salami-l15b";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+		};
+		vreg_l17b: ldo17 {
+			regulator-name = "salami-l17b";
+			regulator-min-microvolt = <2504000>;
+			regulator-max-microvolt = <2504000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+	regulators-1 {
+		compatible = "qcom,pm8550vs-rpmh-regulators";
+		qcom,pmic-id = "d";
+		vreg_l1d: ldo1 {
+			regulator-name = "salami-l1d";
+			regulator-min-microvolt = <880000>;
+			regulator-max-microvolt = <920000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+	regulators-2 {
+		compatible = "qcom,pm8550vs-rpmh-regulators";
+		qcom,pmic-id = "e";
+		vreg_l1e: ldo1 {
+			regulator-name = "salami-l1e";
+			regulator-min-microvolt = <880000>;
+			regulator-max-microvolt = <912000>;
+		};
+		vreg_l3e: ldo3 {
+			regulator-name = "salami-l3e";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+		/* WCN7850 PMU supplies: stock smpe4/smpg2/smpg5/smpg6 ranges. */
+		vreg_s4e: smps4 {
+			regulator-name = "salami-s4e";
+			regulator-min-microvolt = <904000>;
+			regulator-max-microvolt = <984000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+	regulators-3 {
+		compatible = "qcom,pm8550vs-rpmh-regulators";
+		qcom,pmic-id = "g";
+		/* Stock UFS votes S4G as the L1G parent (qcom,vccq-parent-supply). */
+		vdd-l1-supply = <&vreg_s4g>;
+
+		vreg_s4g: smps4 {
+			regulator-name = "salami-s4g";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1352000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		/* Stock init and runtime 1.2 V; a range lets the core pick 1.144 V. */
+		vreg_l1g: ldo1 {
+			regulator-name = "salami-l1g";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		/* Stock qcom,vddp-ref-clk-supply of the UFS host. */
+		vreg_l3g: ldo3 {
+			regulator-name = "salami-l3g";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_s2g: smps2 {
+			regulator-name = "salami-s2g";
+			regulator-min-microvolt = <500000>;
+			regulator-max-microvolt = <1036000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+		vreg_s5g: smps5 {
+			regulator-name = "salami-s5g";
+			regulator-min-microvolt = <500000>;
+			regulator-max-microvolt = <1004000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+		vreg_s6g: smps6 {
+			regulator-name = "salami-s6g";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <2000000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+};
+
+/* Stock PM8550B SID7, repeater 0xfd00: L15B=1.8 V, L5B=3.104 V. */
+&pm8550b_eusb2_repeater {
+	vdd18-supply = <&vreg_l15b>;
+	vdd3-supply = <&vreg_l5b>;
+};
+&usb_1_hsphy {
+	vdd-supply = <&vreg_l1e>;
+	vdda12-supply = <&vreg_l3e>;
+	phys = <&pm8550b_eusb2_repeater>;
+	status = "okay";
+};
+/* This kernel uses the flattened qcom,snps-dwc3 binding. */
+&usb_1 {
+	dr_mode = "otg";
+	maximum-speed = "high-speed";
+	phys = <&usb_1_hsphy>;
+	phy-names = "usb2-phy";
+	qcom,select-utmi-as-pipe-clk;
+	status = "okay";
+	usb-role-switch;
+};
+&usb_1_dwc3_hs { remote-endpoint = <&pmic_glink_hs_in>; };
+&usb_1_dwc3_ss { /delete-property/ remote-endpoint; };
+&usb_dp_qmpphy_usb_ss_in { /delete-property/ remote-endpoint; };
+&usb_dp_qmpphy { status = "disabled"; };
+
+/* Stock PMK8550 SID0, PON 0x1300 IRQ7 KEY_POWER=116, IRQ6 KEY_VOLUMEUP=115. */
+&pon_pwrkey { status = "okay"; };
+
+&pon_resin {
+	linux,code = <KEY_VOLUMEUP>;
+	status = "okay";
+};
+
+&pm8550_gpios {
+	volume_down_n: volume-down-n-state {
+		pins = "gpio6";
+		function = "normal";
+		power-source = <1>;
+		bias-pull-up;
+		input-enable;
+	};
+};
+
+&pm8550vs_c { status = "okay"; };
+&pm8550vs_d { status = "okay"; };
+&pm8550vs_e { status = "okay"; };
+&pm8550vs_g { status = "okay"; };
+
+/* Stock PM8550B SID7 hv-haptics@f000: vmax 1720 mV (0x6b8), LRA period 7692 us (0x1e0c). */
+&pm8550b_haptics {
+	qcom,vmax-microvolt = <1720000>;
+	qcom,lra-period-us = <7692>;
+	status = "okay";
+};
+
+/*
+ * The RTC counter is read-only to the OS; the offset to wall time lives in
+ * SDAM 0x71bc..0x71bf (zero after stock Android, the slot upstream boards use).
+ */
+&pmk8550_rtc {
+	nvmem-cells = <&rtc_offset>;
+	nvmem-cell-names = "offset";
+};
+&pmk8550_sdam_2 {
+	rtc_offset: rtc-offset@bc {
+		reg = <0xbc 0x4>;
+	};
+};
+
+&pmk8550_gpios {
+	/* WCN7850 sleep clock. */
+	pmk8550_sleep_clk: sleep-clk-state {
+		pins = "gpio3";
+		function = "func1";
+		input-disable;
+		output-enable;
+		bias-disable;
+		power-source = <0>;
+	};
+};
+
+/* Stock pcie@1c00000: perst 94, wake 96. */
+&pcie0 {
+	wake-gpios = <&tlmm 96 GPIO_ACTIVE_LOW>;
+	perst-gpios = <&tlmm 94 GPIO_ACTIVE_LOW>;
+	pinctrl-0 = <&pcie0_default_state>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+&pcie0_phy {
+	vdda-phy-supply = <&vreg_l1e>;
+	vdda-pll-supply = <&vreg_l3e>;
+	status = "okay";
+};
+&pcie0_port0 {
+	wifi@0 {
+		compatible = "pci17cb,1107";
+		reg = <0x10000 0x0 0x0 0x0 0x0>;
+		vddrfacmn-supply = <&vreg_pmu_rfa_cmn>;
+		vddaon-supply = <&vreg_pmu_aon_0p59>;
+		vddwlcx-supply = <&vreg_pmu_wlcx_0p8>;
+		vddwlmx-supply = <&vreg_pmu_wlmx_0p85>;
+		vddrfa0p8-supply = <&vreg_pmu_rfa_0p8>;
+		vddrfa1p2-supply = <&vreg_pmu_rfa_1p2>;
+		vddrfa1p8-supply = <&vreg_pmu_rfa_1p8>;
+		vddpcie0p9-supply = <&vreg_pmu_pcie_0p9>;
+		vddpcie1p8-supply = <&vreg_pmu_pcie_1p8>;
+	};
+};
+
+/*
+ * Pin numbers and active-state biases come from the stock runtime FDT,
+ * qupv3_se14_4uart and its pinctrl states.
+ * Reuse the WCN7850 PMU already shared with Wi-Fi.
+ */
+&qupv3_id_1 {
+	status = "okay";
+};
+
+&uart14 {
+	pinctrl-0 = <&bt_uart_default>;
+	status = "okay";
+
+	bluetooth {
+		compatible = "qcom,wcn7850-bt";
+		vddrfacmn-supply = <&vreg_pmu_rfa_cmn>;
+		vddaon-supply = <&vreg_pmu_aon_0p59>;
+		vddwlcx-supply = <&vreg_pmu_wlcx_0p8>;
+		vddwlmx-supply = <&vreg_pmu_wlmx_0p85>;
+		vddrfa0p8-supply = <&vreg_pmu_rfa_0p8>;
+		vddrfa1p2-supply = <&vreg_pmu_rfa_1p2>;
+		vddrfa1p8-supply = <&vreg_pmu_rfa_1p8>;
+	};
+};
+
+&tlmm {
+	/* Stock FDT: qcom,gpios-reserved = <32..39> (TZ-owned). */
+	gpio-reserved-ranges = <32 8>;
+
+	bt_uart_default: bt-uart-default-state {
+		cts-rx-pins {
+			pins = "gpio76", "gpio79";
+			function = "qup2_se6";
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		rts-pins {
+			pins = "gpio77";
+			function = "qup2_se6";
+			drive-strength = <2>;
+			bias-pull-down;
+		};
+
+		tx-pins {
+			pins = "gpio78";
+			function = "qup2_se6";
+			drive-strength = <2>;
+			bias-pull-up;
+		};
+	};
+
+	wlan_en: wlan-en-state {
+		pins = "gpio80";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-pull-down;
+	};
+	bt_default: bt-default-state {
+		bt-en-pins {
+			pins = "gpio81";
+			function = "gpio";
+			drive-strength = <16>;
+			bias-disable;
+		};
+		sw-ctrl-pins {
+			pins = "gpio82";
+			function = "gpio";
+			bias-pull-down;
+		};
+	};
+};
+
+/* Stock: reset TLMM GPIO210 active-low; vcc L17B 1.3 A, vccq L1G 1.2 A, ref-clk L3G. */
+&ufs_mem_hc {
+	reset-gpios = <&tlmm 210 GPIO_ACTIVE_LOW>;
+	vcc-supply = <&vreg_l17b>;
+	vcc-max-microamp = <1300000>;
+	vccq-supply = <&vreg_l1g>;
+	vccq-max-microamp = <1200000>;
+	vdd-hba-supply = <&vreg_l3g>;
+	status = "okay";
+};
+&ufs_mem_phy {
+	vdda-phy-supply = <&vreg_l1d>;
+	vdda-pll-supply = <&vreg_l3e>;
+	status = "okay";
+};
+&gpu { status = "okay"; };
+&gmu { status = "okay"; };
+&gpu_zap_shader {
+	firmware-name = "qcom/sm8550/oneplus/salami/a740_zap.mbn";
+};
+/* Signed VPU30 firmware imported from read-only vendor_a by salami-device. */
+&iris {
+	firmware-name = "qcom/sm8550/oneplus/salami/vpu30_4v.mbn";
+	status = "okay";
+};
+#include "sm8550-oneplus-salami-display-iris7.dtsi"
+#include "sm8550-oneplus-salami-touch.dtsi"
+&camss { status = "disabled"; };
+/*
+ * Firmware: the stock split images from modem_a's image folder, copied to
+ * the root filesystem by salami-device (not redistributed).
+ */
+&ipa {
+	firmware-name = "qcom/sm8550/oneplus/salami/ipa_fws.mdt";
+	status = "okay";
+};
+&remoteproc_adsp {
+	firmware-name = "qcom/sm8550/oneplus/salami/adsp.mdt",
+			"qcom/sm8550/oneplus/salami/adsp_dtb.mdt";
+	status = "okay";
+};
+&remoteproc_cdsp {
+	firmware-name = "qcom/sm8550/oneplus/salami/cdsp.mdt",
+			"qcom/sm8550/oneplus/salami/cdsp_dtb.mdt";
+	status = "okay";
+};
+&remoteproc_mpss {
+	firmware-name = "qcom/sm8550/oneplus/salami/modem.mdt",
+			"qcom/sm8550/oneplus/salami/modem_dtb.mdt";
+	status = "okay";
+};
+
+#include "sm8550-oneplus-salami-thermal.dtsi"
+
+/*
+ * Rear flash: stock qcom,camera-flash uses flash_0/1 and torch_0/1 together,
+ * i.e. channels 0 and 1 (led-sources are 1-based here). Stock allows 500 mA
+ * per torch channel; the torch total is kept at aston's 500 mA.
+ */
+&pm8550_flash {
+	status = "okay";
+
+	led-0 {
+		function = LED_FUNCTION_FLASH;
+		color = <LED_COLOR_ID_WHITE>;
+		led-sources = <1>, <2>;
+		led-max-microamp = <500000>;
+		flash-max-microamp = <2000000>;
+		/* Stock qcom,duration-ms = 1280. */
+		flash-max-timeout-us = <1280000>;
+		function-enumerator = <0>;
+	};
+};
+
+/*
+ * Audio. Stock uses vendor's qcom,kalama-asoc-snd machine driver, which mainline
+ * does not have; this uses the mainline qcom,sm8550-sndcard instead.
+ *
+ * Speakers: two TFA987x on QUP1 SE6 (stock i2c@a98000, 0x34 tfa_channel 0 and
+ * 0x35 tfa_channel 1) fed by Secondary MI2S (stock oplus,speaker-i2s-id = 1,
+ * aux1_pcm pins). Stock names the supply tfa9874_vdd, but both chips report
+ * TFA9873 revision 0x0b73. Both WSA macros and all four wsa884x are disabled in stock.
+ * Microphones go through the WCD9385. The USB-C analog headset (fsa4480) is
+ * not wired yet.
+ */
+&gpi_dma1 {
+	status = "okay";
+};
+
+&qupv3_id_0 {
+	status = "okay";
+};
+
+&i2c6 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	/* Slot 0 (0x34) plays from the top, slot 1 (0x35) from the bottom: checked by ear. */
+	speaker_top: audio-codec@34 {
+		compatible = "nxp,tfa9873";
+		reg = <0x34>;
+		reset-gpios = <&tlmm 50 GPIO_ACTIVE_HIGH>;
+		vddd-supply = <&vreg_l15b>;
+		sound-name-prefix = "Top";
+		#sound-dai-cells = <0>;
+	};
+
+	speaker_bottom: audio-codec@35 {
+		compatible = "nxp,tfa9873";
+		reg = <0x35>;
+		reset-gpios = <&tlmm 173 GPIO_ACTIVE_HIGH>;
+		vddd-supply = <&vreg_l15b>;
+		nxp,tdm-slot = <1>;
+		sound-name-prefix = "Bottom";
+		#sound-dai-cells = <0>;
+	};
+};
+
+&q6apmbedai {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	dai@12 {
+		reg = <SECONDARY_MI2S_RX>;
+		clocks = <&q6prmcc LPASS_CLK_ID_SEC_MI2S_IBIT LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
+		clock-names = "bclk";
+	};
+};
+
+&swr1 {
+	status = "okay";
+
+	/* WCD9385 RX */
+	wcd_rx: codec@0,4 {
+		compatible = "sdw20217010d00";
+		reg = <0 4>;
+		qcom,rx-port-mapping = <1 2 3 4 5>;
+	};
+};
+
+&swr2 {
+	status = "okay";
+
+	/* WCD9385 TX */
+	wcd_tx: codec@0,3 {
+		compatible = "sdw20217010d00";
+		reg = <0 3>;
+		qcom,tx-port-mapping = <2 2 3 4>;
+	};
+};
+
+/ {
+	wcd938x: audio-codec {
+		compatible = "qcom,wcd9385-codec";
+
+		/* Required by qcom,wcd938x.yaml; the reference DTS files omit it and
+		 * only get a warning, but the DAI links need it to resolve.
+		 */
+		#sound-dai-cells = <1>;
+
+		pinctrl-0 = <&wcd_default>;
+		pinctrl-names = "default";
+
+		/* Stock qcom,cdc-micbias{1,2,3,4}-mv = 2700 mV. */
+		qcom,micbias1-microvolt = <2700000>;
+		qcom,micbias2-microvolt = <2700000>;
+		qcom,micbias3-microvolt = <2700000>;
+		qcom,micbias4-microvolt = <2700000>;
+		qcom,mbhc-buttons-vthreshold-microvolt = <75000 150000 237000 500000 500000 500000 500000 500000>;
+		qcom,mbhc-headset-vthreshold-microvolt = <1700000>;
+		qcom,mbhc-headphone-vthreshold-microvolt = <50000>;
+		qcom,rx-device = <&wcd_rx>;
+		qcom,tx-device = <&wcd_tx>;
+
+		/* Stock: wcd938x_reset_active/sleep on tlmm gpio108. */
+		reset-gpios = <&tlmm 108 GPIO_ACTIVE_LOW>;
+
+		/* Stock phandles: cdc-vdd-buck/rxtx/vddio = pm_humu_l15 (1.8 V),
+		 * cdc-vdd-mic-bias = pm_humu_bob1. Same rails aston uses.
+		 */
+		vdd-buck-supply = <&vreg_l15b>;
+		vdd-rxtx-supply = <&vreg_l15b>;
+		vdd-io-supply = <&vreg_l15b>;
+		vdd-mic-bias-supply = <&vreg_bob1>;
+	};
+
+	sound {
+		compatible = "qcom,sm8550-sndcard", "qcom,sm8450-sndcard";
+		pinctrl-0 = <&i2s1_default>;
+		pinctrl-names = "default";
+
+		/* Card name: also names the topology and the UCM file. */
+		model = "salamisnd";
+
+		audio-routing = "IN1_HPHL", "HPHL_OUT",
+				"IN2_HPHR", "HPHR_OUT",
+				"AMIC1", "MIC BIAS1",
+				"AMIC2", "MIC BIAS2",
+				"AMIC3", "MIC BIAS3",
+				"AMIC4", "MIC BIAS4",
+				"AMIC5", "MIC BIAS3",
+				"TX SWR_INPUT0", "ADC1_OUTPUT",
+				"TX SWR_INPUT1", "ADC2_OUTPUT",
+				"TX SWR_INPUT0", "ADC3_OUTPUT",
+				"TX SWR_INPUT1", "ADC4_OUTPUT";
+
+		secondary-i2s-dai-link {
+			link-name = "Secondary MI2S Playback";
+
+			cpu {
+				sound-dai = <&q6apmbedai SECONDARY_MI2S_RX>;
+			};
+
+			codec {
+				sound-dai = <&speaker_top>, <&speaker_bottom>;
+			};
+
+			platform {
+				sound-dai = <&q6apm>;
+			};
+		};
+
+		/* The WCD9385 is reached over SoundWire through the LPASS codec DMAs. */
+		wcd-playback-dai-link {
+			link-name = "WCD Playback";
+
+			cpu {
+				sound-dai = <&q6apmbedai RX_CODEC_DMA_RX_0>;
+			};
+
+			codec {
+				sound-dai = <&wcd938x 0>, <&swr1 0>, <&lpass_rxmacro 0>;
+			};
+
+			platform {
+				sound-dai = <&q6apm>;
+			};
+		};
+
+		wcd-capture-dai-link {
+			link-name = "WCD Capture";
+
+			cpu {
+				/* The DMA the aston link and the SM8550 topologies use. */
+				sound-dai = <&q6apmbedai TX_CODEC_DMA_TX_3>;
+			};
+
+			codec {
+				sound-dai = <&wcd938x 1>, <&swr2 0>, <&lpass_txmacro 0>;
+			};
+
+			platform {
+				sound-dai = <&q6apm>;
+			};
+		};
+	};
+};
+
+&tlmm {
+	/* Stock aux1_pcm_*_active: clk 121, din 122, ws 123, dout 124. */
+	i2s1_default: i2s1-default-state {
+		sck-pins {
+			pins = "gpio121";
+			function = "i2s1_sck";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		data0-pins {
+			pins = "gpio122";
+			function = "i2s1_data0";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		ws-pins {
+			pins = "gpio123";
+			function = "i2s1_ws";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		data1-pins {
+			pins = "gpio124";
+			function = "i2s1_data1";
+			drive-strength = <8>;
+			bias-disable;
+		};
+	};
+
+	wcd_default: wcd-reset-n-active-state {
+		pins = "gpio108";
+		function = "gpio";
+		drive-strength = <16>;
+		bias-disable;
+		output-low;
+	};
+};
+

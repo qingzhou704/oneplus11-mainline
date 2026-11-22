@@ -1,0 +1,14 @@
+# Bring-up root shell without authentication, reachable only from the USB link.
+# Turn off with: systemctl disable --now salami-debug-shell.socket
+[Unit]
+Description=OnePlus 11 USB debug shell
+
+[Socket]
+ListenStream=192.168.77.2:2323
+FreeBind=yes
+Accept=yes
+IPAddressAllow=192.168.77.0/24
+IPAddressDeny=any
+
+[Install]
+WantedBy=sockets.target

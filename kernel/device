@@ -1,0 +1,5 @@
+# OnePlus 11 PHB110 / project 22811, RAM USB candidate.
+name='OnePlus 11 (salami)'
+vendor=qcom
+soc=sm8550
+boot=android-gki

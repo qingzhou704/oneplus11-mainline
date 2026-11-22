@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.deb
+*.img
+*.tar
+*.tar.xz
+*.tar.zst
+*.cpio
+/out/
+/private/

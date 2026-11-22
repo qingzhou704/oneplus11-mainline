@@ -1,0 +1,14 @@
+[Unit]
+Description=OnePlus 11 power button short/long press handler
+After=systemd-udevd.service systemd-logind.service dbus.service
+ConditionPathExists=/sys/class/input
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/salami/power-key
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=5
+
+[Install]
+WantedBy=multi-user.target

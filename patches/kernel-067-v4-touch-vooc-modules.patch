@@ -1,0 +1,614 @@
+From 576b7791b8b9bc9774b50416a91cf4804c50a894 Mon Sep 17 00:00:00 2001
+From: OnePlus 11 mainline port <noreply@localhost>
+Date: Sat, 21 Nov 2026 21:05:10 -0500
+Subject: [PATCH] input: synaptics_tcm, power: qcom_battmgr: add
+ DT2W/glove/sleep touch modes, live VOOC callbacks, and
+ ipset/aqc111/playstation modules
+
+---
+ devices/salami/kernel.config                  |  11 +
+ drivers/input/touchscreen/synaptics_tcm_i2c.c | 298 +++++++++++++++---
+ drivers/power/supply/qcom_battmgr.c           |  92 +++++-
+ 3 files changed, 350 insertions(+), 51 deletions(-)
+
+diff --git a/devices/salami/kernel.config b/devices/salami/kernel.config
+index e68e527dc..6e32be8f4 100644
+--- a/devices/salami/kernel.config
++++ b/devices/salami/kernel.config
+@@ -91,3 +91,14 @@ CONFIG_NFT_QUOTA=m
+ CONFIG_NETFILTER_XT_MATCH_LIMIT=m
+ CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=m
+ CONFIG_NETFILTER_XT_MATCH_CONNLIMIT=m
++# Redirect NAT, IPSet, USB 5GbE, PlayStation HID, and LED triggers.
++CONFIG_NFT_REDIR=m
++CONFIG_IP_SET=m
++CONFIG_IP_SET_HASH_IP=m
++CONFIG_IP_SET_HASH_NET=m
++CONFIG_IP_SET_HASH_IPPORT=m
++CONFIG_NETFILTER_XT_SET=m
++CONFIG_USB_NET_AQC111=m
++CONFIG_HID_PLAYSTATION=m
++CONFIG_LEDS_TRIGGER_NETDEV=m
++CONFIG_LEDS_TRIGGER_TRANSIENT=m
+diff --git a/drivers/input/touchscreen/synaptics_tcm_i2c.c b/drivers/input/touchscreen/synaptics_tcm_i2c.c
+index 80e1d19f1..4e21855ac 100644
+--- a/drivers/input/touchscreen/synaptics_tcm_i2c.c
++++ b/drivers/input/touchscreen/synaptics_tcm_i2c.c
+@@ -55,13 +55,27 @@
+ #define SYNA_APP_BOOTING			0x01
+ #define SYNA_APP_UPDATING		0x02
+ 
++#define SYNA_DC_WAKEUP_GESTURE_MODE	0x09
++#define SYNA_DC_ENABLE_GLOVE		0x0d
+ #define SYNA_DC_REPORT_FREQUENCY	0xe6
++#define SYNA_DC_GESTURE_MASK		0xfe
++
++#define SYNA_GESTURE_DOUBLE_TAP		0x01
++#define SYNA_GESTURE_MASK_DT2W		0x0001
++
++enum syna_power_mode {
++	SYNA_MODE_ACTIVE = 0,
++	SYNA_MODE_GESTURE,
++	SYNA_MODE_SLEEP,
++};
+ 
+ /*
+  * The panel takes its vsync from this controller (TP/TSP), whose report
+  * frequency must follow the display rate. Keep equal to the panel's refresh.
+  */
+ static unsigned int refresh = 120;
++static bool glove;
++static enum syna_power_mode power_mode = SYNA_MODE_ACTIVE;
+ 
+ #define SYNA_OBJECT_FINGER		1
+ #define SYNA_OBJECT_GLOVED_FINGER	2
+@@ -145,6 +159,8 @@ struct syna_tcm {
+ 	struct mutex lock;
+ 	bool report_configured;
+ 	bool asleep;
++	bool gesture_active;
++	bool system_suspended;
+ 	unsigned int read_length;
+ 	unsigned int read_limit;
+ 	unsigned int write_limit;
+@@ -368,26 +384,123 @@ static int syna_check_app_info(struct syna_tcm *ts,
+ static DEFINE_MUTEX(syna_active_lock);
+ static struct syna_tcm *syna_active_ts;
+ 
++static void syna_release_contacts(struct syna_tcm *ts)
++{
++	/* DROP_UNUSED releases every slot when this frame has no contacts. */
++	input_mt_sync_frame(ts->input);
++	input_sync(ts->input);
++}
++
++static int syna_set_dynamic_config_locked(struct syna_tcm *ts, u8 id, u16 val)
++{
++	u8 buf[3] = { id, val & 0xff, val >> 8 };
++
++	return syna_exec_command(ts, SYNA_CMD_SET_DYNAMIC_CONFIG, buf, sizeof(buf));
++}
++
+ static int syna_set_report_freq_locked(struct syna_tcm *ts, unsigned int hz)
+ {
+-	u8 frequency[3] = { SYNA_DC_REPORT_FREQUENCY, 0, 0 };
++	u16 code;
+ 
+ 	/* Stock syna_report_refresh_switch() default table: 60->1, 90->3, 120->2. */
+ 	switch (hz) {
+ 	case 60:
+-		frequency[1] = 1;
++		code = 1;
+ 		break;
+ 	case 90:
+-		frequency[1] = 3;
++		code = 3;
+ 		break;
+ 	case 120:
+-		frequency[1] = 2;
++		code = 2;
+ 		break;
+ 	default:
+ 		return -EINVAL;
+ 	}
+-	return syna_exec_command(ts, SYNA_CMD_SET_DYNAMIC_CONFIG,
+-				 frequency, sizeof(frequency));
++	return syna_set_dynamic_config_locked(ts, SYNA_DC_REPORT_FREQUENCY, code);
++}
++
++static int syna_configure_reports(struct syna_tcm *ts);
++
++static int syna_wake_from_sleep_locked(struct syna_tcm *ts)
++{
++	struct syna_app_info info;
++	int ret;
++
++	ts->report_configured = false;
++	ts->gesture_active = false;
++	ret = syna_exec_command(ts, SYNA_CMD_EXIT_DEEP_SLEEP, NULL, 0);
++	if (ret)
++		return ret;
++	ret = syna_get_app_info(ts, &info);
++	if (ret)
++		return ret;
++	ret = syna_check_app_info(ts, &info);
++	if (ret)
++		return ret;
++	if (le16_to_cpu(info.max_x) != ts->max_x ||
++	    le16_to_cpu(info.max_y) != ts->max_y ||
++	    le16_to_cpu(info.max_objects) != ts->max_objects ||
++	    le16_to_cpu(info.max_touch_report_config_size) != ts->config_size)
++		return -EPROTO;
++	ret = syna_configure_reports(ts);
++	if (!ret)
++		ts->asleep = false;
++	return ret;
++}
++
++static int syna_apply_power_mode_locked(struct syna_tcm *ts, enum syna_power_mode target)
++{
++	int ret;
++
++	switch (target) {
++	case SYNA_MODE_ACTIVE:
++		if (ts->asleep)
++			return syna_wake_from_sleep_locked(ts);
++		if (ts->gesture_active) {
++			ret = syna_set_dynamic_config_locked(ts, SYNA_DC_WAKEUP_GESTURE_MODE, 0);
++			if (ret)
++				return ret;
++			ret = syna_set_report_freq_locked(ts, refresh);
++			if (ret)
++				return ret;
++			ret = syna_set_dynamic_config_locked(ts, SYNA_DC_ENABLE_GLOVE, glove ? 1 : 0);
++			if (ret)
++				return ret;
++			ts->gesture_active = false;
++		}
++		return 0;
++	case SYNA_MODE_GESTURE:
++		if (ts->asleep) {
++			ret = syna_wake_from_sleep_locked(ts);
++			if (ret)
++				return ret;
++		}
++		if (ts->input)
++			syna_release_contacts(ts);
++		ret = syna_set_dynamic_config_locked(ts, SYNA_DC_WAKEUP_GESTURE_MODE, 1);
++		if (ret)
++			return ret;
++		ret = syna_set_dynamic_config_locked(ts, SYNA_DC_GESTURE_MASK, SYNA_GESTURE_MASK_DT2W);
++		if (ret) {
++			syna_set_dynamic_config_locked(ts, SYNA_DC_WAKEUP_GESTURE_MODE, 0);
++			return ret;
++		}
++		ts->gesture_active = true;
++		return 0;
++	case SYNA_MODE_SLEEP:
++		if (!ts->asleep) {
++			ret = syna_exec_command(ts, SYNA_CMD_ENTER_DEEP_SLEEP, NULL, 0);
++			if (ret)
++				return ret;
++			ts->asleep = true;
++			ts->gesture_active = false;
++			if (ts->input)
++				syna_release_contacts(ts);
++		}
++		return 0;
++	default:
++		return -EINVAL;
++	}
+ }
+ 
+ static int syna_refresh_set(const char *val, const struct kernel_param *kp)
+@@ -404,10 +517,10 @@ static int syna_refresh_set(const char *val, const struct kernel_param *kp)
+ 
+ 	mutex_lock(&syna_active_lock);
+ 	ts = syna_active_ts;
+-	if (ts) {
++	if (ts && !ts->system_suspended) {
+ 		disable_irq(ts->client->irq);
+ 		mutex_lock(&ts->lock);
+-		if (!ts->asleep && ts->report_configured)
++		if (!ts->asleep && !ts->gesture_active && ts->report_configured)
+ 			ret = syna_set_report_freq_locked(ts, hz);
+ 		if (!ret)
+ 			refresh = hz;
+@@ -427,6 +540,94 @@ static const struct kernel_param_ops syna_refresh_ops = {
+ module_param_cb(refresh, &syna_refresh_ops, &refresh, 0644);
+ MODULE_PARM_DESC(refresh, "Display refresh rate in Hz: 60, 90 or 120 (runtime writable)");
+ 
++static int syna_glove_set(const char *val, const struct kernel_param *kp)
++{
++	struct syna_tcm *ts;
++	bool enable;
++	int ret;
++
++	ret = kstrtobool(val, &enable);
++	if (ret)
++		return ret;
++
++	mutex_lock(&syna_active_lock);
++	ts = syna_active_ts;
++	if (ts && !ts->system_suspended) {
++		disable_irq(ts->client->irq);
++		mutex_lock(&ts->lock);
++		if (!ts->asleep && !ts->gesture_active && ts->report_configured)
++			ret = syna_set_dynamic_config_locked(ts, SYNA_DC_ENABLE_GLOVE,
++							    enable ? 1 : 0);
++		if (!ret)
++			glove = enable;
++		mutex_unlock(&ts->lock);
++		enable_irq(ts->client->irq);
++	} else {
++		glove = enable;
++	}
++	mutex_unlock(&syna_active_lock);
++	return ret;
++}
++
++static const struct kernel_param_ops syna_glove_ops = {
++	.set = syna_glove_set,
++	.get = param_get_bool,
++};
++module_param_cb(glove, &syna_glove_ops, &glove, 0644);
++MODULE_PARM_DESC(glove, "High-sensitivity glove touch mode (runtime writable)");
++
++static int syna_power_mode_set(const char *val, const struct kernel_param *kp)
++{
++	enum syna_power_mode target;
++	struct syna_tcm *ts;
++	int ret = 0;
++
++	if (sysfs_streq(val, "active"))
++		target = SYNA_MODE_ACTIVE;
++	else if (sysfs_streq(val, "gesture"))
++		target = SYNA_MODE_GESTURE;
++	else if (sysfs_streq(val, "sleep"))
++		target = SYNA_MODE_SLEEP;
++	else
++		return -EINVAL;
++
++	mutex_lock(&syna_active_lock);
++	ts = syna_active_ts;
++	if (ts && !ts->system_suspended) {
++		disable_irq(ts->client->irq);
++		mutex_lock(&ts->lock);
++		ret = syna_apply_power_mode_locked(ts, target);
++		if (!ret)
++			power_mode = target;
++		mutex_unlock(&ts->lock);
++		enable_irq(ts->client->irq);
++	} else {
++		power_mode = target;
++	}
++	mutex_unlock(&syna_active_lock);
++	return ret;
++}
++
++static int syna_power_mode_get(char *buf, const struct kernel_param *kp)
++{
++	const char *name = "active";
++
++	mutex_lock(&syna_active_lock);
++	if (power_mode == SYNA_MODE_GESTURE)
++		name = "gesture";
++	else if (power_mode == SYNA_MODE_SLEEP)
++		name = "sleep";
++	mutex_unlock(&syna_active_lock);
++	return sysfs_emit(buf, "%s\n", name);
++}
++
++static const struct kernel_param_ops syna_power_mode_ops = {
++	.set = syna_power_mode_set,
++	.get = syna_power_mode_get,
++};
++module_param_cb(power_mode, &syna_power_mode_ops, &power_mode, 0644);
++MODULE_PARM_DESC(power_mode, "Touch controller mode: active, gesture (DT2W), or sleep");
++
+ static void syna_clear_active(void *data)
+ {
+ 	mutex_lock(&syna_active_lock);
+@@ -465,10 +666,16 @@ static int syna_configure_reports(struct syna_tcm *ts)
+ 	ret = syna_set_report_freq_locked(ts, refresh);
+ 	if (ret)
+ 		return ret;
++	if (glove) {
++		ret = syna_set_dynamic_config_locked(ts, SYNA_DC_ENABLE_GLOVE, 1);
++		if (ret)
++			dev_warn(&ts->client->dev, "glove mode init skipped: %d\n", ret);
++	}
+ 	ret = syna_exec_command(ts, SYNA_CMD_ENABLE_REPORT, &report, 1);
+ 	if (ret)
+ 		return ret;
+ 	ts->report_configured = true;
++	ts->gesture_active = false;
+ 	return 0;
+ }
+ 
+@@ -528,24 +735,20 @@ static void syna_report_touch(struct syna_tcm *ts)
+ 	input_sync(ts->input);
+ }
+ 
+-static void syna_release_contacts(struct syna_tcm *ts)
+-{
+-	/* DROP_UNUSED releases every slot when this frame has no contacts. */
+-	input_mt_sync_frame(ts->input);
+-	input_sync(ts->input);
+-}
+-
+ static irqreturn_t syna_irq(int irq, void *data)
+ {
+ 	struct syna_tcm *ts = data;
+ 	int ret;
+ 
+ 	mutex_lock(&ts->lock);
++	if (ts->asleep)
++		goto out;
+ 	ret = syna_recv_message(ts);
+ 	if (ret)
+ 		goto error;
+ 	if (ts->code == SYNA_REPORT_IDENTIFY) {
+ 		ts->report_configured = false;
++		ts->gesture_active = false;
+ 		ret = -ECONNRESET;
+ 		goto error;
+ 	}
+@@ -555,6 +758,16 @@ static irqreturn_t syna_irq(int irq, void *data)
+ 		ret = -EPIPE;
+ 		goto error;
+ 	}
++	if (ts->gesture_active) {
++		if (ts->payload_length >= SYNA_REPORT_PREFIX_SIZE &&
++		    ts->message[SYNA_HEADER_SIZE] == SYNA_GESTURE_DOUBLE_TAP) {
++			input_report_key(ts->input, KEY_WAKEUP, 1);
++			input_sync(ts->input);
++			input_report_key(ts->input, KEY_WAKEUP, 0);
++			input_sync(ts->input);
++		}
++		goto out;
++	}
+ 	ret = syna_parse_report(ts);
+ 	if (ret)
+ 		goto error;
+@@ -684,6 +897,7 @@ static int syna_probe(struct i2c_client *client)
+ 	ts->input->name = "Synaptics S3908 Touchscreen";
+ 	ts->input->id.bustype = BUS_I2C;
+ 	ts->input->dev.parent = dev;
++	input_set_capability(ts->input, EV_KEY, KEY_WAKEUP);
+ 	input_set_abs_params(ts->input, ABS_MT_POSITION_X, 0, ts->max_x, 0, 0);
+ 	input_set_abs_params(ts->input, ABS_MT_POSITION_Y, 0, ts->max_y, 0, 0);
+ 	input_set_abs_params(ts->input, ABS_MT_TOUCH_MAJOR, 0, 4095, 0, 0);
+@@ -701,6 +915,13 @@ static int syna_probe(struct i2c_client *client)
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "IRQ registration failed\n");
+ 	mutex_lock(&syna_active_lock);
++	if (power_mode != SYNA_MODE_ACTIVE) {
++		disable_irq(client->irq);
++		mutex_lock(&ts->lock);
++		syna_apply_power_mode_locked(ts, power_mode);
++		mutex_unlock(&ts->lock);
++		enable_irq(client->irq);
++	}
+ 	syna_active_ts = ts;
+ 	mutex_unlock(&syna_active_lock);
+ 	ret = devm_add_action_or_reset(dev, syna_clear_active, ts);
+@@ -715,17 +936,26 @@ static int syna_suspend(struct device *dev)
+ {
+ 	struct i2c_client *client = to_i2c_client(dev);
+ 	struct syna_tcm *ts = i2c_get_clientdata(client);
+-	int ret;
++	int ret = 0;
+ 
++	mutex_lock(&syna_active_lock);
++	ts->system_suspended = true;
+ 	disable_irq(client->irq);
+ 	mutex_lock(&ts->lock);
+-	ret = syna_exec_command(ts, SYNA_CMD_ENTER_DEEP_SLEEP, NULL, 0);
+-	if (!ret)
+-		ts->asleep = true;
++	if (!ts->asleep) {
++		ret = syna_exec_command(ts, SYNA_CMD_ENTER_DEEP_SLEEP, NULL, 0);
++		if (!ret) {
++			ts->asleep = true;
++			ts->gesture_active = false;
++		}
++	}
+ 	syna_release_contacts(ts);
+ 	mutex_unlock(&ts->lock);
+-	if (ret)
++	if (ret) {
++		ts->system_suspended = false;
+ 		enable_irq(client->irq);
++	}
++	mutex_unlock(&syna_active_lock);
+ 	return ret;
+ }
+ 
+@@ -733,36 +963,20 @@ static int syna_resume(struct device *dev)
+ {
+ 	struct i2c_client *client = to_i2c_client(dev);
+ 	struct syna_tcm *ts = i2c_get_clientdata(client);
+-	struct syna_app_info info;
+ 	int ret;
+ 
++	mutex_lock(&syna_active_lock);
+ 	mutex_lock(&ts->lock);
+-	ts->report_configured = false;
+-	ret = syna_exec_command(ts, SYNA_CMD_EXIT_DEEP_SLEEP, NULL, 0);
+-	if (ret)
+-		goto out;
+-	ret = syna_get_app_info(ts, &info);
+-	if (ret)
+-		goto out;
+-	ret = syna_check_app_info(ts, &info);
+-	if (ret)
+-		goto out;
+-	if (le16_to_cpu(info.max_x) != ts->max_x ||
+-	    le16_to_cpu(info.max_y) != ts->max_y ||
+-	    le16_to_cpu(info.max_objects) != ts->max_objects ||
+-	    le16_to_cpu(info.max_touch_report_config_size) != ts->config_size) {
+-		ret = -EPROTO;
+-		goto out;
+-	}
+-	ret = syna_configure_reports(ts);
+-	if (!ret)
+-		ts->asleep = false;
+-out:
++	ret = syna_wake_from_sleep_locked(ts);
++	if (!ret && power_mode != SYNA_MODE_ACTIVE)
++		ret = syna_apply_power_mode_locked(ts, power_mode);
+ 	if (ret)
+ 		dev_err(dev, "resume failed, touch input unavailable: %d\n", ret);
+ 	mutex_unlock(&ts->lock);
++	ts->system_suspended = false;
+ 	/* Drain/log IRQs on failure, but never parse an unverified layout. */
+ 	enable_irq(client->irq);
++	mutex_unlock(&syna_active_lock);
+ 	return ret;
+ }
+ 
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index a0c687766..cc55f19e8 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -2565,12 +2565,80 @@ static void qcom_battmgr_charge_control_worker(struct work_struct *work)
+ 				 CHARGE_CTRL_POLL_INTERVAL);
+ }
+ 
++static DEFINE_MUTEX(qcom_battmgr_vooc_lock);
++static struct qcom_battmgr *qcom_battmgr_vooc_dev;
++
+ static bool vooc_allowed;
+-module_param_named(vooc, vooc_allowed, bool, 0644);
++static unsigned int vooc_cool_down;
++
++static int qcom_battmgr_vooc_param_set(const char *val, const struct kernel_param *kp)
++{
++	struct qcom_battmgr *battmgr;
++	bool allow, prev;
++	int ret;
++
++	ret = kstrtobool(val, &allow);
++	if (ret)
++		return ret;
++
++	mutex_lock(&qcom_battmgr_vooc_lock);
++	prev = READ_ONCE(vooc_allowed);
++	WRITE_ONCE(vooc_allowed, allow);
++	battmgr = qcom_battmgr_vooc_dev;
++	if (battmgr) {
++		if (!prev && allow) {
++			mutex_lock(&battmgr->lock);
++			battmgr->oplus.vooc.blocked = false;
++			battmgr->oplus.vooc.retried = false;
++			mutex_unlock(&battmgr->lock);
++		}
++		mod_delayed_work(system_power_efficient_wq,
++				 &battmgr->vooc_check_work, 0);
++	}
++	mutex_unlock(&qcom_battmgr_vooc_lock);
++	return 0;
++}
++
++static const struct kernel_param_ops qcom_battmgr_vooc_ops = {
++	.set = qcom_battmgr_vooc_param_set,
++	.get = param_get_bool,
++};
++module_param_cb(vooc, &qcom_battmgr_vooc_ops, &vooc_allowed, 0644);
+ MODULE_PARM_DESC(vooc, "Allow SUPERVOOC on OnePlus SM8550 boards with USB connector thermistors");
+ 
+-static unsigned int vooc_cool_down;
+-module_param(vooc_cool_down, uint, 0644);
++static int qcom_battmgr_vooc_cool_set(const char *val, const struct kernel_param *kp)
++{
++	struct qcom_battmgr *battmgr;
++	unsigned int level;
++	int ret;
++
++	ret = kstrtouint(val, 10, &level);
++	if (ret)
++		return ret;
++	if (level > 32)
++		return -EINVAL;
++
++	WRITE_ONCE(vooc_cool_down, level);
++	mutex_lock(&qcom_battmgr_vooc_lock);
++	battmgr = qcom_battmgr_vooc_dev;
++	if (battmgr) {
++		mutex_lock(&battmgr->lock);
++		if (battmgr->service_up && battmgr->oplus.vooc.enabled)
++			qcom_battmgr_request_property(battmgr,
++						      BATTMGR_BAT_PROPERTY_SET,
++						      OPLUS_SM8550_BATT_SET_COOL_DOWN,
++						      level);
++		mutex_unlock(&battmgr->lock);
++	}
++	mutex_unlock(&qcom_battmgr_vooc_lock);
++	return 0;
++}
++
++static const struct kernel_param_ops qcom_battmgr_vooc_cool_ops = {
++	.set = qcom_battmgr_vooc_cool_set,
++	.get = param_get_uint,
++};
++module_param_cb(vooc_cool_down, &qcom_battmgr_vooc_cool_ops, &vooc_cool_down, 0644);
+ MODULE_PARM_DESC(vooc_cool_down, "SUPERVOOC current level passed to the ADSP, 0 for its maximum");
+ 
+ /*
+@@ -2654,18 +2722,16 @@ static void qcom_battmgr_vooc_check_worker(struct work_struct *work)
+ 	static const char * const names[] = { "usb_l", "usb_r" };
+ 	int port_mc[ARRAY_SIZE(vooc->port)];
+ 	const char *veto = NULL;
+-	bool online = false, idle = false;
++	bool online = false;
+ 	bool want;
+ 	int i, val, ret = 0;
+ 
+ 	mutex_lock(&battmgr->lock);
+ 	if (!battmgr->service_up || !vooc->supported)
+ 		goto out_unlock;
+-	/* Nothing to undo: ask the firmware nothing, only watch for vooc=1. */
+-	if (!READ_ONCE(vooc_allowed) && !vooc->enabled && !vooc->buck_suspended) {
+-		idle = true;
++	/* Nothing to undo: vooc_param_set queues vooc_check_work immediately on vooc=1. */
++	if (!READ_ONCE(vooc_allowed) && !vooc->enabled && !vooc->buck_suspended)
+ 		goto out_unlock;
+-	}
+ 
+ 	for (i = 0; i < ARRAY_SIZE(vooc->port); i++) {
+ 		/* The ADC may come up after this driver; see post-init-providers. */
+@@ -2735,7 +2801,7 @@ static void qcom_battmgr_vooc_check_worker(struct work_struct *work)
+ out_unlock:
+ 	mutex_unlock(&battmgr->lock);
+ 	/* Unplugged with nothing to watch: the next plug event restarts this. */
+-	if (online || ret || idle)
++	if (online || ret)
+ 		mod_delayed_work(system_power_efficient_wq, &battmgr->vooc_check_work,
+ 				 OPLUS_VOOC_CHECK_INTERVAL);
+ }
+@@ -2849,6 +2915,11 @@ static void qcom_battmgr_vooc_teardown(void *data)
+ 	struct qcom_battmgr *battmgr = data;
+ 	struct qcom_battmgr_vooc *vooc = &battmgr->oplus.vooc;
+ 
++	mutex_lock(&qcom_battmgr_vooc_lock);
++	if (qcom_battmgr_vooc_dev == battmgr)
++		qcom_battmgr_vooc_dev = NULL;
++	mutex_unlock(&qcom_battmgr_vooc_lock);
++
+ 	mutex_lock(&battmgr->lock);
+ 	vooc->supported = false;
+ 	mutex_unlock(&battmgr->lock);
+@@ -3062,6 +3133,9 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
+ 		ret = devm_add_action(dev, qcom_battmgr_vooc_teardown, battmgr);
+ 		if (ret)
+ 			return ret;
++		mutex_lock(&qcom_battmgr_vooc_lock);
++		qcom_battmgr_vooc_dev = battmgr;
++		mutex_unlock(&qcom_battmgr_vooc_lock);
+ 	}
+ 
+ 	/* After the client, so the cooling device goes away before it. */
+-- 
+2.43.0
+

@@ -1,0 +1,73 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""Supply the phone's private factory address once its HCI setup finishes."""
+from pathlib import Path
+import socket
+import struct
+import sys
+import time
+
+sys.dont_write_bytecode = True
+
+# Linux Bluetooth Management API, include/net/bluetooth/mgmt.h.
+READ_INDEX_LIST = 0x0003
+READ_INFO = 0x0004
+READ_UNCONF_INDEX_LIST = 0x0036
+SET_PUBLIC_ADDRESS = 0x0039
+CMD_COMPLETE = 0x0001
+CMD_STATUS = 0x0002
+UNCONF_INDEX_ADDED = 0x001D
+INDEX_NONE = 0xFFFF
+
+index = int(sys.argv[1].removeprefix('hci'))
+text = Path('/var/lib/salami/bluetooth-address').read_text().strip()
+address = bytes.fromhex(text.replace(':', ''))[::-1]
+if len(address) != 6 or address == bytes(6):
+    raise ValueError('Factory Bluetooth address must contain six nonzero-address bytes')
+
+with socket.socket(socket.AF_BLUETOOTH, socket.SOCK_RAW, socket.BTPROTO_HCI) as mgmt:
+    mgmt.bind((INDEX_NONE, 3))  # HCI_CHANNEL_CONTROL
+    mgmt.send(struct.pack('<HHH', READ_INDEX_LIST, INDEX_NONE, 0))
+    mgmt.send(struct.pack('<HHH', READ_UNCONF_INDEX_LIST, INDEX_NONE, 0))
+    deadline = time.monotonic() + 20
+    action = None
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('Controller did not finish HCI setup within 20 seconds')
+        mgmt.settimeout(remaining)
+        packet = mgmt.recv(65535)
+        event, controller, size = struct.unpack_from('<HHH', packet)
+        payload = packet[6:]
+        if len(payload) != size:
+            raise ValueError('Truncated Bluetooth management event')
+        unconfigured = event == UNCONF_INDEX_ADDED and controller == index
+        if event in (CMD_COMPLETE, CMD_STATUS):
+            opcode, status = struct.unpack_from('<HB', payload)
+            if opcode not in (READ_INDEX_LIST, READ_INFO, READ_UNCONF_INDEX_LIST, SET_PUBLIC_ADDRESS):
+                continue
+            if status:
+                raise RuntimeError(f'Management command 0x{opcode:04x} failed: 0x{status:02x}')
+            if event == CMD_STATUS:
+                continue
+            data = payload[3:]
+            if opcode in (READ_INDEX_LIST, READ_UNCONF_INDEX_LIST):
+                count = struct.unpack_from('<H', data)[0]
+                indexes = struct.unpack_from(f'<{count}H', data, 2)
+                if index in indexes and action is None:
+                    if opcode == READ_INDEX_LIST:
+                        action = 'verify'
+                        mgmt.send(struct.pack('<HHH', READ_INFO, index, 0))
+                    else:
+                        unconfigured = True
+            elif opcode == READ_INFO and controller == index:
+                if data[:6] != address:
+                    raise RuntimeError('Configured controller differs from the factory address')
+                print(f'hci{index}: factory address already active')
+                break
+            elif opcode == SET_PUBLIC_ADDRESS and controller == index:
+                print(f'hci{index}: factory address supplied; kernel will finish registration')
+                break
+        if unconfigured and action is None:
+            action = 'set'
+            mgmt.send(struct.pack('<HHH', SET_PUBLIC_ADDRESS, index, len(address)) + address)

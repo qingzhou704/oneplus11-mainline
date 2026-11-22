@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+rm -rf /usr/lib/salami/__pycache__
+if [ "$1" = remove ] || [ "$1" = deconfigure ]; then
+    if [ -d /run/systemd/system ] && ! systemd-detect-virt --quiet --chroot; then
+        systemctl stop salami-modem-guard.timer salami-modem-guard.service 2>/dev/null || true
+    fi
+fi

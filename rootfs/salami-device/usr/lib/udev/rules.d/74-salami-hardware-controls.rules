@@ -1,0 +1,13 @@
+# Allow local/remote administrators (sudo group) and desktop Quick Settings to
+# adjust rear torch, AMOLED brightness, battery charge thresholds, and haptics
+# without privilege escalation.
+ACTION!="remove", SUBSYSTEM=="leds", KERNEL=="white:flash-0", RUN+="/bin/chgrp sudo /sys%p/brightness", RUN+="/bin/chmod 0664 /sys%p/brightness"
+ACTION!="remove", SUBSYSTEM=="backlight", KERNEL=="ae94000.dsi.0", RUN+="/bin/chgrp sudo /sys%p/brightness", RUN+="/bin/chmod 0664 /sys%p/brightness"
+ACTION!="remove", SUBSYSTEM=="power_supply", KERNEL=="qcom-battmgr-bat", RUN+="/bin/chgrp sudo /sys%p/charge_control_end_threshold /sys%p/charge_control_start_threshold", RUN+="/bin/chmod 0664 /sys%p/charge_control_end_threshold /sys%p/charge_control_start_threshold"
+ACTION!="remove", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="qcom-spmi-haptics", GROUP="sudo", MODE="0660"
+ACTION!="remove", SUBSYSTEM=="cpu", KERNEL=="cpu[0-9]*", TEST=="cpufreq/scaling_governor", RUN+="/bin/chgrp sudo /sys%p/cpufreq/scaling_governor /sys%p/cpufreq/scaling_max_freq", RUN+="/bin/chmod 0664 /sys%p/cpufreq/scaling_governor /sys%p/cpufreq/scaling_max_freq"
+ACTION!="remove", SUBSYSTEM=="cpu", KERNEL=="cpu0", TEST=="../cpufreq/boost", RUN+="/bin/chgrp sudo /sys/devices/system/cpu/cpufreq/boost", RUN+="/bin/chmod 0664 /sys/devices/system/cpu/cpufreq/boost"
+ACTION!="remove", SUBSYSTEM=="devfreq", KERNEL=="3d00000.gpu", RUN+="/bin/chgrp sudo /sys%p/min_freq /sys%p/max_freq", RUN+="/bin/chmod 0664 /sys%p/min_freq /sys%p/max_freq"
+ACTION!="remove", SUBSYSTEM=="module", KERNEL=="qcom_battmgr", TEST=="parameters/vooc", RUN+="/bin/sh -c 'chgrp sudo /sys%p/parameters/vooc /sys%p/parameters/vooc_cool_down 2>/dev/null; chmod 0664 /sys%p/parameters/vooc /sys%p/parameters/vooc_cool_down 2>/dev/null || true'"
+ACTION!="remove", SUBSYSTEM=="module", KERNEL=="panel_samsung_amb670yf07_iris7", TEST=="parameters/refresh", RUN+="/bin/sh -c 'chgrp sudo /sys%p/parameters/refresh /sys%p/parameters/hbm 2>/dev/null; chmod 0664 /sys%p/parameters/refresh /sys%p/parameters/hbm 2>/dev/null || true'"
+ACTION!="remove", SUBSYSTEM=="module", KERNEL=="synaptics_tcm_i2c", TEST=="parameters/refresh", RUN+="/bin/sh -c 'chgrp sudo /sys%p/parameters/refresh /sys%p/parameters/glove /sys%p/parameters/power_mode 2>/dev/null; chmod 0664 /sys%p/parameters/refresh /sys%p/parameters/glove /sys%p/parameters/power_mode 2>/dev/null || true'"

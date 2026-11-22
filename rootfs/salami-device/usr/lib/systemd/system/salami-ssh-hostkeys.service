@@ -1,0 +1,14 @@
+# The rootfs ships without host keys; each install creates its own.
+# Only ssh.service is ordered: ssh.socket sits before sockets.target, which comes before this
+# unit's default basic.target dependency, so ordering the socket too forms a cycle.
+[Unit]
+Description=Generate SSH host keys
+ConditionFileNotEmpty=!/etc/ssh/ssh_host_ed25519_key
+Before=ssh.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ssh-keygen -A
+
+[Install]
+WantedBy=multi-user.target ssh.service

@@ -1,0 +1,6 @@
+[Unit]
+Description=OnePlus 11 USB debug shell session
+
+[Service]
+ExecStart=-/bin/bash -i
+StandardInput=socket

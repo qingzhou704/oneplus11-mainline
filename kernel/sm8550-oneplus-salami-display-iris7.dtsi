@@ -1,0 +1,115 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+
+&apps_rsc {
+	regulators-0 {
+		vreg_l12b: ldo12 {
+			regulator-name = "salami-l12b";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+		};
+		vreg_l13b: ldo13 {
+			regulator-name = "salami-l13b";
+			regulator-min-microvolt = <3200000>;
+			regulator-max-microvolt = <3200000>;
+		};
+	};
+};
+
+&mdss {
+	status = "okay";
+};
+
+&mdss_dsi0 {
+	status = "okay";
+	vdda-supply = <&vreg_l3e>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&salami_panel_reset &salami_panel_te>;
+
+	salami_panel: panel@0 {
+		compatible = "samsung,amb670yf07-cs";
+		reg = <0>;
+		vddio-supply = <&vreg_l12b>;
+		vci-supply = <&vreg_l13b>;
+		reset-gpios = <&tlmm 133 GPIO_ACTIVE_LOW>;
+		vout-gpios = <&tlmm 90 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+
+		port {
+			salami_panel_in: endpoint {
+				remote-endpoint = <&mdss_dsi0_out>;
+			};
+		};
+	};
+};
+
+&mdss_dsi0_out {
+	remote-endpoint = <&salami_panel_in>;
+	data-lanes = <0 1 2 3>;
+};
+
+&mdss_dsi0_phy {
+	vdds-supply = <&vreg_l1e>;
+	status = "okay";
+};
+
+/* Iris secondary input is not a second physical panel. */
+&mdss_dsi1 {
+	status = "disabled";
+};
+
+&mdss_dsi1_phy {
+	status = "disabled";
+};
+
+&tlmm {
+	salami_panel_reset: salami-panel-reset-state {
+		pins = "gpio133";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
+	salami_panel_te: salami-panel-te-state {
+		pins = "gpio86";
+		function = "mdp_vsync";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+};
+
+&salami_panel {
+	/* Iris and panel vddio independently vote the shared L12B rail. */
+	clocks = <&rpmhcc RPMH_DIV_CLK1>;
+	clock-names = "iris";
+	iris-v18-supply = <&vreg_l12b>;
+	iris-v09-enable-gpios = <&tlmm 105 GPIO_ACTIVE_HIGH>;
+	iris-vdd-enable-gpios = <&tlmm 92 GPIO_ACTIVE_HIGH>;
+	iris-reset-gpios = <&tlmm 109 GPIO_ACTIVE_LOW>;
+	iris-wakeup-gpios = <&tlmm 129 GPIO_ACTIVE_HIGH>;
+	iris-abyp-ready-gpios = <&tlmm 181 GPIO_ACTIVE_HIGH>;
+	vsync-mux-gpios = <&tlmm 57 GPIO_ACTIVE_HIGH>;
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&salami_iris_controls &salami_iris_clk>;
+};
+
+&tlmm {
+	salami_iris_controls: salami-iris-controls-state {
+		pins = "gpio109", "gpio129", "gpio181";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
+};
+
+&pmk8550_gpios {
+	salami_iris_clk: iris-clk-state {
+		pins = "gpio5";
+		function = "func2";
+		input-disable;
+		output-enable;
+		bias-disable;
+		power-source = <0>;
+	};
+};

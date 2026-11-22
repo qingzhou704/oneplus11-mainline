@@ -1,0 +1,7 @@
+# Locally patched builds (see README.md). A higher Ubuntu version would otherwise replace
+# them on the next upgrade and silently drop the patch; merge Ubuntu updates by hand instead.
+# Matches only the +salami builds, so a system still on Ubuntu's version is unaffected.
+# A regex is required: apt treats a trailing '*' as a plain prefix match, so '*+salami*' never matches.
+Package: gnome-remote-desktop rmtfs gnome-initial-setup v2rayn
+Pin: version /\+salami[0-9]+$/
+Pin-Priority: 1001

@@ -1,0 +1,14 @@
+# Ubuntu desktop session and removable-storage packages included in clean builds.
+ubuntu-session
+ubuntu-settings
+gnome-shell-ubuntu-extensions
+yaru-theme-gnome-shell
+yaru-theme-gtk
+yaru-theme-icon
+yaru-theme-sound
+gsettings-ubuntu-schemas
+fonts-ubuntu
+dosfstools
+exfatprogs
+ntfs-3g
+usbutils

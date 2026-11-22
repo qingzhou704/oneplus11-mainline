@@ -1,0 +1,11 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Ensure every internal UFS 4.0 LUN (1d84000.ufshc) uses scheduler=none,
+# read_ahead_kb=256, and rq_affinity=2 even if an early-boot uevent hit EBUSY.
+set -eu
+for q in /sys/devices/platform/soc@0/1d84000.ufshc/host*/target*/*/block/sd[a-z]/queue; do
+    [ -d "$q" ] || continue
+    echo 256 > "$q/read_ahead_kb" 2>/dev/null || true
+    echo 2 > "$q/rq_affinity" 2>/dev/null || true
+    echo none > "$q/scheduler" 2>/dev/null || true
+done

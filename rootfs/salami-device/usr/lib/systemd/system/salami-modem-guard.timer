@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodic OnePlus 11 5G cellular baseband health check
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=20s
+
+[Install]
+WantedBy=timers.target

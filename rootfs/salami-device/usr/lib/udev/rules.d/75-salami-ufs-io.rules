@@ -1,0 +1,4 @@
+# Tune internal UFS 4.0 flash queue: bypass single-queue mq-deadline lock contention,
+# reduce 4K random read amplification (1024 -> 256 KiB), and complete I/O on the
+# submitting CPU core. Scoped strictly to 1d84000.ufshc; USB drives are unaffected.
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="sd[a-z]", KERNELS=="1d84000.ufshc", ATTR{queue/read_ahead_kb}="256", ATTR{queue/rq_affinity}="2", ATTR{queue/scheduler}="none"

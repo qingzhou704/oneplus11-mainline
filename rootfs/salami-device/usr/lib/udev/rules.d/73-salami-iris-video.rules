@@ -1,0 +1,1 @@
+SUBSYSTEM=="video4linux", DRIVERS=="qcom-iris", GROUP="render", MODE="0666"

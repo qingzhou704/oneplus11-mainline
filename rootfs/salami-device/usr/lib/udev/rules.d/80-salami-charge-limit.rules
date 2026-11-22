@@ -1,0 +1,3 @@
+# Set the user's initial 80% ceiling once the battery service is ready.
+# Nonzero thresholds belong to the operator and are not overwritten on changes.
+ACTION!="remove", SUBSYSTEM=="power_supply", KERNEL=="qcom-battmgr-bat", ATTR{charge_control_end_threshold}=="0", ATTR{charge_control_end_threshold}="80", ATTR{charge_control_start_threshold}="75"

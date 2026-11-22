@@ -1,0 +1,37 @@
+Third-party notices and acknowledgments
+=======================================
+
+Original integration code, device scripts and packaging in this repository are
+licensed under GPL-2.0-only (see LICENSE) unless a file states otherwise.
+Third-party components, patches and upstream tools retain their original
+authorship and licenses.
+
+Upstream projects and references
+--------------------------------
+* Linux kernel stable tree (GPL-2.0):
+  https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/
+
+* OnePlus Pad 2 Pro mainline Linux & Android mainline porting methodology by
+  yzddmr6 (workflow, RAM-boot safety model, rootfs build/verification design):
+  https://github.com/yzddmr6/onepluspad-2pro-mainline
+  https://github.com/yzddmr6/android-mainline-port
+
+* SM8550 / OnePlus mainline platform and driver work:
+  - Linux Qualcomm (linux-msm) & Freedreno/Mesa communities
+  - Synaptics S3908 TouchComm I2C driver submission by Vsevolod Nevorotov
+  - OnePlus open-source kernel/devicetree references:
+    https://github.com/OnePlusOSS
+
+* Audio, modem and video userspace/driver components:
+  - AudioReach topology (BSD-3-Clause):
+    https://github.com/Audioreach/audioreach-topology
+  - rmtfs Qualcomm Remote Filesystem Service (BSD-3-Clause):
+    https://github.com/linux-msm/rmtfs
+  - qcom-va-driver VA-API backend for Qualcomm Iris V4L2 stateful devices:
+    https://github.com/radxa-pkg/qcom-va-driver
+
+* Distribution and build components:
+  - Ubuntu packages (Canonical and respective upstream authors)
+  - GNOME Shell, GNOME Remote Desktop and GNOME Initial Setup (GPL-2.0+)
+  - Mozilla Firefox official APT packages (MPL-2.0)
+  - BusyBox (GPL-2.0) and AOSP mkbootimg / avbtool (Apache-2.0)

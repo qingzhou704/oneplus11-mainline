@@ -1,0 +1,12 @@
+[Unit]
+Description=OnePlus 11 USB NCM gadget
+Requires=sys-kernel-config.mount
+After=sys-kernel-config.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/salami/usb-gadget
+
+[Install]
+WantedBy=multi-user.target

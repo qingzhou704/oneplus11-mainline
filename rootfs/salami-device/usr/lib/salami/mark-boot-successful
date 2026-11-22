@@ -1,0 +1,104 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""Set the Qualcomm A/B "successful" bit on a boot partition's GPT entry.
+
+Linux equivalent of Android's boot_control markBootSuccessful: after flashing boot_a, ABL clears
+bit 54 of that entry's attributes. Only that bit and the CRC fields of both GPT headers change;
+any inconsistency between the primary and backup tables aborts before writing.
+Attribute byte 6 (bits 48-55): priority 0x03, active 0x04, retry count 0x38, successful 0x40,
+unbootable 0x80.
+"""
+import argparse
+import os
+import struct
+import sys
+import zlib
+
+sys.dont_write_bytecode = True
+
+SUCCESSFUL, ACTIVE, UNBOOTABLE = 0x40, 0x04, 0x80
+
+
+def find_disk(part):
+    for name in sorted(os.listdir('/sys/class/block')):
+        try:
+            with open(f'/sys/class/block/{name}/uevent', encoding='utf-8') as f:
+                uevent = f.read().split()
+        except OSError:
+            continue
+        if f'PARTNAME={part}' in uevent:
+            return '/dev/' + os.path.basename(os.path.dirname(os.path.realpath(f'/sys/class/block/{name}')))
+    sys.exit(f'{part}: partition not found')
+
+
+def header(fd, lba, ss):
+    raw = os.pread(fd, ss, lba * ss)
+    sig, _, size, crc, _, cur, alt = struct.unpack_from('<8sIIIIQQ', raw)
+    elba, count, esize, ecrc = struct.unpack_from('<QIII', raw, 72)
+    check = bytearray(raw[:size])
+    check[16:20] = bytes(4)
+    if sig != b'EFI PART' or size != 92 or zlib.crc32(check) != crc or cur != lba:
+        sys.exit(f'GPT header at LBA {lba} is not valid')
+    entries = os.pread(fd, count * esize, elba * ss)
+    if zlib.crc32(entries) != ecrc:
+        sys.exit(f'GPT entries for header at LBA {lba} fail CRC')
+    return bytearray(raw), bytearray(entries), alt, elba, esize
+
+
+def write(fd, raw, entries, lba, elba, ss):
+    struct.pack_into('<I', raw, 88, zlib.crc32(entries))
+    struct.pack_into('<I', raw, 16, 0)
+    struct.pack_into('<I', raw, 16, zlib.crc32(raw[:92]))
+    os.pwrite(fd, bytes(entries), elba * ss)
+    os.pwrite(fd, bytes(raw), lba * ss)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument('--part', default='boot_a')
+    ap.add_argument('--disk', help='default: the disk holding --part')
+    ap.add_argument('--dry-run', action='store_true')
+    a = ap.parse_args()
+    disk = a.disk or find_disk(a.part)
+    with open(f'/sys/block/{os.path.basename(disk)}/queue/logical_block_size', encoding='utf-8') as f:
+        ss = int(f.read())
+    fd = os.open(disk, os.O_RDWR if not a.dry_run else os.O_RDONLY)
+    try:
+        praw, pent, alt, pelba, esize = header(fd, 1, ss)
+        braw, bent, back, belba, _ = header(fd, alt, ss)
+        if back != 1 or pent != bent:
+            sys.exit('primary and backup GPT differ')
+        names = [bytes(pent[i:i + esize][56:128]).decode('utf-16le').rstrip('\0') for i in range(0, len(pent), esize)]
+        if names.count(a.part) != 1:
+            sys.exit(f'{a.part}: expected exactly one GPT entry')
+        off = names.index(a.part) * esize + 54
+        old = pent[off]
+        print(f'{disk} {a.part} entry {names.index(a.part) + 1}: attribute byte 6 = {old:#04x}')
+        if old & SUCCESSFUL:
+            print('already successful')
+            return
+        if old & UNBOOTABLE or not old & ACTIVE:
+            sys.exit('slot is unbootable or not active; not marking it')
+        if a.dry_run:
+            print(f'would set {old | SUCCESSFUL:#04x}')
+            return
+        pent[off] = bent[off] = old | SUCCESSFUL
+        write(fd, braw, bent, alt, belba, ss)
+        write(fd, praw, pent, 1, pelba, ss)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    # Read back through a new descriptor.
+    fd = os.open(disk, os.O_RDONLY)
+    try:
+        _, pent2, _, _, _ = header(fd, 1, ss)
+        _, bent2, _, _, _ = header(fd, alt, ss)
+    finally:
+        os.close(fd)
+    if pent2 != pent or bent2 != bent:
+        sys.exit('read-back differs')
+    print(f'set {pent[off]:#04x}')
+
+
+if __name__ == '__main__':
+    main()

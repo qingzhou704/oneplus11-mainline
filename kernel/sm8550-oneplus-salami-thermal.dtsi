@@ -1,0 +1,576 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Thermal sensors, calibrated PMIC zones, and CPU/GPU throttling maps
+ * for OnePlus 11 (salami, project 22811).
+ * Sources: private/stock-2026-11-06/fdt.dts (vadc@9000 L14780..15049,
+ * xo-therm L10817..10885) and odm_a sys_high_temp_protect_OPPO_22811.xml.
+ */
+
+/ {
+	iio-hwmon {
+		compatible = "iio-hwmon";
+		io-channels = <&pmk8550_vadc ADC5_GEN3_DIE_TEMP(0)>,
+			      <&pmk8550_vadc ADC5_GEN3_AMUX1_THM_100K_PU(0)>,
+			      <&pmk8550_vadc ADC5_GEN3_DIE_TEMP(1)>,
+			      <&pmk8550_vadc ADC5_GEN3_AMUX1_THM_100K_PU(1)>,
+			      <&pmk8550_vadc ADC5_GEN3_AMUX2_THM_100K_PU(1)>,
+			      <&pmk8550_vadc ADC5_GEN3_AMUX3_THM_100K_PU(1)>,
+			      <&pmk8550_vadc ADC5_GEN3_AMUX4_THM_100K_PU(1)>,
+			      <&pmk8550_vadc ADC5_GEN3_AMUX5_THM_100K_PU(1)>,
+			      <&pmk8550_vadc ADC5_GEN3_AMUX6_THM_100K_PU(1)>,
+			      <&pmk8550_vadc ADC5_GEN3_AMUX4_GPIO_100K_PU(1)>,
+			      <&pmk8550_vadc ADC5_GEN3_DIE_TEMP(2)>,
+			      <&pmk8550_vadc ADC5_GEN3_DIE_TEMP(3)>,
+			      <&pmk8550_vadc ADC5_GEN3_DIE_TEMP(4)>,
+			      <&pmk8550_vadc ADC5_GEN3_DIE_TEMP(5)>,
+			      <&pmk8550_vadc ADC5_GEN3_DIE_TEMP(6)>,
+			      <&pmk8550_vadc ADC5_GEN3_DIE_TEMP(7)>,
+			      <&pmk8550_vadc ADC5_GEN3_AMUX4_THM_100K_PU(7)>,
+			      <&pmk8550_vadc ADC5_GEN3_AMUX6_THM_100K_PU(7)>,
+			      <&pmk8550_vadc ADC5_GEN3_AMUX2_GPIO_100K_PU(7)>,
+			      <&pmk8550_vadc ADC5_GEN3_AMUX3_GPIO_100K_PU(7)>;
+	};
+
+	xo_therm_sensor: thermal-sensor-xo {
+		compatible = "generic-adc-thermal";
+		#thermal-sensor-cells = <0>;
+		io-channels = <&pmk8550_vadc ADC5_GEN3_AMUX1_THM_100K_PU(0)>;
+		io-channel-names = "sensor-channel";
+	};
+
+	skin_msm_sensor: thermal-sensor-skin-msm {
+		compatible = "generic-adc-thermal";
+		#thermal-sensor-cells = <0>;
+		io-channels = <&pmk8550_vadc ADC5_GEN3_AMUX1_THM_100K_PU(1)>;
+		io-channel-names = "sensor-channel";
+	};
+
+	thermal-zones {
+		cpu0-thermal {
+			polling-delay-passive = <250>;
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu0_alert0>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map1 {
+					trip = <&cpu0_alert1>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		cpu1-thermal {
+			polling-delay-passive = <250>;
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu1_alert0>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map1 {
+					trip = <&cpu1_alert1>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		cpu2-thermal {
+			polling-delay-passive = <250>;
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu2_alert0>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map1 {
+					trip = <&cpu2_alert1>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		cpu3-top-thermal {
+			polling-delay-passive = <250>;
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu3_top_alert0>;
+					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map1 {
+					trip = <&cpu3_top_alert1>;
+					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		cpu3-bottom-thermal {
+			polling-delay-passive = <250>;
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu3_bottom_alert0>;
+					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map1 {
+					trip = <&cpu3_bottom_alert1>;
+					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		cpu4-top-thermal {
+			polling-delay-passive = <250>;
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu4_top_alert0>;
+					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map1 {
+					trip = <&cpu4_top_alert1>;
+					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		cpu4-bottom-thermal {
+			polling-delay-passive = <250>;
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu4_bottom_alert0>;
+					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map1 {
+					trip = <&cpu4_bottom_alert1>;
+					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		cpu5-top-thermal {
+			polling-delay-passive = <250>;
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu5_top_alert0>;
+					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map1 {
+					trip = <&cpu5_top_alert1>;
+					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		cpu5-bottom-thermal {
+			polling-delay-passive = <250>;
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu5_bottom_alert0>;
+					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map1 {
+					trip = <&cpu5_bottom_alert1>;
+					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		cpu6-top-thermal {
+			polling-delay-passive = <250>;
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu6_top_alert0>;
+					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map1 {
+					trip = <&cpu6_top_alert1>;
+					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		cpu6-bottom-thermal {
+			polling-delay-passive = <250>;
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu6_bottom_alert0>;
+					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map1 {
+					trip = <&cpu6_bottom_alert1>;
+					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		cpu7-top-thermal {
+			polling-delay-passive = <250>;
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu7_top_alert0>;
+					cooling-device = <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map1 {
+					trip = <&cpu7_top_alert1>;
+					cooling-device = <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		cpu7-middle-thermal {
+			polling-delay-passive = <250>;
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu7_middle_alert0>;
+					cooling-device = <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map1 {
+					trip = <&cpu7_middle_alert1>;
+					cooling-device = <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		cpu7-bottom-thermal {
+			polling-delay-passive = <250>;
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu7_bottom_alert0>;
+					cooling-device = <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map1 {
+					trip = <&cpu7_bottom_alert1>;
+					cooling-device = <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		pm8550vs-c-thermal {
+			trips {
+				pm8550vs_c_trip0: trip0 {
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&pm8550vs_c_trip0>;
+					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		pm8550vs-d-thermal {
+			trips {
+				pm8550vs_d_trip0: trip0 {
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&pm8550vs_d_trip0>;
+					cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		xo-thermal {
+			polling-delay-passive = <500>;
+			polling-delay = <2000>;
+			thermal-sensors = <&xo_therm_sensor>;
+
+			trips {
+				xo_alert0: trip-point0 {
+					temperature = <78000>;
+					hysteresis = <8000>;
+					type = "passive";
+				};
+
+				xo_alert1: trip-point1 {
+					temperature = <80000>;
+					hysteresis = <10000>;
+					type = "passive";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&xo_alert0>;
+					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map1 {
+					trip = <&xo_alert1>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		skin-msm-thermal {
+			polling-delay-passive = <500>;
+			polling-delay = <2000>;
+			thermal-sensors = <&skin_msm_sensor>;
+
+			trips {
+				skin_alert0: trip-point0 {
+					temperature = <50000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
+				skin_alert1: trip-point1 {
+					temperature = <55000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
+				skin_alert2: trip-point2 {
+					temperature = <62000>;
+					hysteresis = <3000>;
+					type = "passive";
+				};
+
+				skin_crit: trip-critical {
+					temperature = <85000>;
+					hysteresis = <5000>;
+					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&skin_alert0>;
+					cooling-device = <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map1 {
+					trip = <&skin_alert1>;
+					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map2 {
+					trip = <&skin_alert2>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+	};
+};
+
+&pm8550_gpios {
+	salami_svooc_therm_default: salami-svooc-therm-state {
+		pins = "gpio12";
+		function = "normal";
+		bias-high-impedance;
+	};
+};
+
+/*
+ * Stock oplus,battery usb_temp_adc / usb_supplementary_temp_adc /
+ * subboard_temp_adc: 100k NTCs on PM8550B, read ratiometric with the 1.875 V
+ * pull-up (stock con_volt_855 table: 938 mV at 25 C), so the generic 100k_PU
+ * scaling applies. Stock pins: gpio5 (left), gpio10 (right), gpio6 (subboard).
+ */
+&pm8550b_gpios {
+	usb_therm_default: usb-therm-state {
+		pins = "gpio5", "gpio6", "gpio10";
+		function = "normal";
+		bias-high-impedance;
+	};
+};
+
+/* Replace the temp-alarm fallback stage with calibrated ADC readings. */
+&pm8550_temp_alarm {
+	io-channels = <&pmk8550_vadc ADC5_GEN3_DIE_TEMP(1)>;
+	io-channel-names = "thermal";
+};
+
+&pm8550vs_c_temp_alarm {
+	io-channels = <&pmk8550_vadc ADC5_GEN3_DIE_TEMP(2)>;
+	io-channel-names = "thermal";
+};
+
+&pm8550vs_d_temp_alarm {
+	io-channels = <&pmk8550_vadc ADC5_GEN3_DIE_TEMP(3)>;
+	io-channel-names = "thermal";
+};
+
+&pm8550vs_e_temp_alarm {
+	io-channels = <&pmk8550_vadc ADC5_GEN3_DIE_TEMP(4)>;
+	io-channel-names = "thermal";
+};
+
+&pm8550ve_temp_alarm {
+	io-channels = <&pmk8550_vadc ADC5_GEN3_DIE_TEMP(5)>;
+	io-channel-names = "thermal";
+};
+
+&pm8550vs_g_temp_alarm {
+	io-channels = <&pmk8550_vadc ADC5_GEN3_DIE_TEMP(6)>;
+	io-channel-names = "thermal";
+};
+
+&pm8550b_temp_alarm {
+	io-channels = <&pmk8550_vadc ADC5_GEN3_DIE_TEMP(7)>;
+	io-channel-names = "thermal";
+};
+
+&pmk8550_vadc {
+	pinctrl-0 = <&salami_svooc_therm_default>, <&usb_therm_default>;
+	pinctrl-names = "default";
+
+	channel@44 {
+		reg = <ADC5_GEN3_AMUX1_THM_100K_PU(0)>;
+		label = "pmk8550_xo_therm";
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+	};
+
+	channel@103 {
+		reg = <ADC5_GEN3_DIE_TEMP(1)>;
+		label = "pm8550_die_temp";
+	};
+
+	channel@144 {
+		reg = <ADC5_GEN3_AMUX1_THM_100K_PU(1)>;
+		label = "skin_msm_therm";
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+	};
+
+	channel@145 {
+		reg = <ADC5_GEN3_AMUX2_THM_100K_PU(1)>;
+		label = "cam_flash_therm";
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+	};
+
+	channel@146 {
+		reg = <ADC5_GEN3_AMUX3_THM_100K_PU(1)>;
+		label = "wlan_therm";
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+	};
+
+	channel@147 {
+		reg = <ADC5_GEN3_AMUX4_THM_100K_PU(1)>;
+		label = "pa_therm_1";
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+	};
+
+	channel@148 {
+		reg = <ADC5_GEN3_AMUX5_THM_100K_PU(1)>;
+		label = "rear_tof_therm";
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+	};
+
+	channel@149 {
+		reg = <ADC5_GEN3_AMUX6_THM_100K_PU(1)>;
+		label = "pm8550_exp2_therm";
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+	};
+
+	channel@14d {
+		reg = <ADC5_GEN3_AMUX4_GPIO_100K_PU(1)>;
+		label = "svooc_therm";
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+	};
+
+	channel@203 {
+		reg = <ADC5_GEN3_DIE_TEMP(2)>;
+		label = "pm8550vs_c_die_temp";
+	};
+
+	channel@303 {
+		reg = <ADC5_GEN3_DIE_TEMP(3)>;
+		label = "pm8550vs_d_die_temp";
+	};
+
+	channel@403 {
+		reg = <ADC5_GEN3_DIE_TEMP(4)>;
+		label = "pm8550vs_e_die_temp";
+	};
+
+	channel@503 {
+		reg = <ADC5_GEN3_DIE_TEMP(5)>;
+		label = "pm8550ve_die_temp";
+	};
+
+	channel@603 {
+		reg = <ADC5_GEN3_DIE_TEMP(6)>;
+		label = "pm8550vs_g_die_temp";
+	};
+
+	channel@703 {
+		reg = <ADC5_GEN3_DIE_TEMP(7)>;
+		label = "pm8550b_die_temp";
+	};
+
+	channel@747 {
+		reg = <ADC5_GEN3_AMUX4_THM_100K_PU(7)>;
+		label = "usb_connector_therm";
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+	};
+
+	channel@749 {
+		reg = <ADC5_GEN3_AMUX6_THM_100K_PU(7)>;
+		label = "usb_r_therm";
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+	};
+
+	channel@74b {
+		reg = <ADC5_GEN3_AMUX2_GPIO_100K_PU(7)>;
+		label = "usb_l_therm";
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+	};
+
+	channel@74c {
+		reg = <ADC5_GEN3_AMUX3_GPIO_100K_PU(7)>;
+		label = "subboard_therm";
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+	};
+};

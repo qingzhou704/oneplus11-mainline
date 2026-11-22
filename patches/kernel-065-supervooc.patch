@@ -1,0 +1,588 @@
+diff --git a/arch/arm64/boot/dts/qcom/sm8550-oneplus-salami.dts b/arch/arm64/boot/dts/qcom/sm8550-oneplus-salami.dts
+index bb6fd8e04..1d133e8fa 100644
+--- a/arch/arm64/boot/dts/qcom/sm8550-oneplus-salami.dts
++++ b/arch/arm64/boot/dts/qcom/sm8550-oneplus-salami.dts
+@@ -54,6 +54,12 @@ ramoops@e2000000 {
+ 	pmic-glink {
+ 		compatible = "oneplus,sm8550-pmic-glink", "qcom,sm8550-pmic-glink",
+ 			     "qcom,pmic-glink";
++		/* Stock usb_temp_adc and usb_supplementary_temp_adc guard SUPERVOOC. */
++		io-channels = <&pmk8550_vadc ADC5_GEN3_AMUX2_GPIO_100K_PU(7)>,
++			      <&pmk8550_vadc ADC5_GEN3_AMUX6_THM_100K_PU(7)>;
++		io-channel-names = "usb_l", "usb_r";
++		/* Battery and USB role events must not wait for the ADC. */
++		post-init-providers = <&pmk8550_vadc>;
+ 		#address-cells = <1>;
+ 		#size-cells = <0>;
+ 
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index 1d9376b19..f9927b0cf 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -7,6 +7,7 @@
+ #include <linux/auxiliary_bus.h>
+ #include <linux/delay.h>
+ #include <linux/devm-helpers.h>
++#include <linux/iio/consumer.h>
+ #include <linux/module.h>
+ #include <linux/mutex.h>
+ #include <linux/nvmem-consumer.h>
+@@ -101,6 +102,53 @@ enum qcom_battmgr_variant {
+ #define OPLUS_SM8550_USB_OTG_AP_ENABLE	17
+ #define OPLUS_SM8550_USB_OTG_VBUS_ENABLE	24
+ 
++/*
++ * SUPERVOOC runs in the ADSP (stock oplus,adsp-voocphy): it talks to the
++ * adapter and owns the current tables and the battery, BTB and overvoltage
++ * protection. The stock host enables it on a DCP, keeps the PMIC charger off
++ * while it charges, restarts a stalled handshake and guards the USB
++ * connector temperature. Stock PMIC GLINK IDs:
++ */
++#define OPLUS_SM8550_USB_VOOCPHY_STATUS		15
++#define OPLUS_SM8550_USB_VOOCPHY_ENABLE		16
++#define OPLUS_SM8550_USB_VOOCPHY_RESET_AGAIN	28
++#define OPLUS_SM8550_BATT_SET_COOL_DOWN		28
++#define OPLUS_SM8550_BATT_SET_MATCH_TEMP	29
++
++/* Low byte of USB_VOOCPHY_STATUS, stock FASTCHG_STATUS; bits 16-23 give a reason. */
++enum oplus_vooc_status {
++	OPLUS_VOOC_PRESENT = 1,
++	OPLUS_VOOC_ONGOING,
++	OPLUS_VOOC_ABSENT,
++	OPLUS_VOOC_FULL,
++	OPLUS_VOOC_BAD_CONNECTED,
++	OPLUS_VOOC_BATT_TEMP_OVER,
++	OPLUS_VOOC_BTB_TEMP_OVER,
++	OPLUS_VOOC_DUMMY_START,
++	OPLUS_VOOC_ADAPTER_COPYCAT,
++	OPLUS_VOOC_ERR_COMMU,
++	OPLUS_VOOC_SWITCH_TEMP_RANGE,
++	OPLUS_VOOC_COMMU_TIME_OUT,
++	OPLUS_VOOC_COMMU_CLK_ERR,
++	OPLUS_VOOC_COMMU_SEND_ERR,
++	OPLUS_VOOC_HW_VBATT_HIGH,
++	OPLUS_VOOC_HW_TBATT_HIGH,
++};
++
++/*
++ * Host limits, tighter than stock: it charges fast up to a 44.0 C battery
++ * (qcom,vooc_temp_bat_hot_decidegc) and acts on the connector at 57/69 C or
++ * 12 C above the battery. Here the fast path only stops, and the PMIC
++ * charger takes over until the next plug.
++ */
++#define OPLUS_VOOC_BATT_MIN_DECIDEGC	120
++#define OPLUS_VOOC_BATT_MAX_DECIDEGC	430
++#define OPLUS_VOOC_PORT_MAX_MILLIC	50000
++#define OPLUS_VOOC_PORT_GAP_MILLIC	12000
++#define OPLUS_VOOC_CHECK_INTERVAL	(5 * HZ)
++/* Stock waits this long after the handshake starts for the fast path. */
++#define OPLUS_VOOC_HANDSHAKE_MS		8500
++
+ #define BATTMGR_WLS_PROPERTY_GET	0x34
+ #define BATTMGR_WLS_PROPERTY_SET	0x35
+ #define WLS_ONLINE			0
+@@ -120,12 +168,16 @@ enum qcom_battmgr_variant {
+ #define CHARGE_CTRL_POLL_INTERVAL	(30 * HZ)
+ 
+ 
++#define NOTIF_OPLUS_VOOC_STATUS				0x48
+ #define NOTIF_OPLUS_OTG_ENABLE				0x50
+ #define NOTIF_OPLUS_OTG_DISABLE				0x51
++#define NOTIF_OPLUS_VOOC_HANDSHAKE			0x52
+ #define NOTIF_OPLUS_CID_DETECT				0x53
+ #define NOTIF_OPLUS_TYPEC_STATE_CHANGE			0x55
+ #define NOTIF_OPLUS_PLUGIN_IRQ				0x57
+ #define NOTIF_OPLUS_APSD_DONE				0x58
++/* Charge pumps on the host; salami (stock DUAL_BATT_100W) has none. */
++#define NOTIF_OPLUS_CP_MOS_DISABLE			0x64
+ #define NOTIF_OPLUS_UFCS_DISABLE_MOS			0x73
+ #define NOTIF_OPLUS_PD_SOURCECAP_DONE			0x79
+ #define NOTIF_OPLUS_POWER_ROLE_STATUS			0x7d
+@@ -344,12 +396,35 @@ struct qcom_battmgr_wireless {
+ 	unsigned int current_max;
+ };
+ 
++enum {
++	OPLUS_VOOC_EV_STATUS,
++	OPLUS_VOOC_EV_HANDSHAKE,
++};
++
++struct qcom_battmgr_vooc {
++	/* USB connector thermistors; a board without them never charges fast. */
++	bool supported;
++	struct iio_channel *port[2];
++	/* USB_VOOCPHY_ENABLE as last read or written. */
++	bool enabled;
++	bool handshake;
++	bool ongoing;
++	bool buck_suspended;
++	/* One RESET_AGAIN per plug. */
++	bool retried;
++	/* No fast charging until the next plug. */
++	bool blocked;
++	bool service_seen;
++	unsigned long events;
++};
++
+ struct qcom_battmgr_oplus {
+ 	bool otg_state;
+ 	bool input_suspended;
+ 	bool charge_inhibited;
+ 	bool charge_state_valid;
+ 	u32 value;
++	struct qcom_battmgr_vooc vooc;
+ };
+ 
+ /*
+@@ -405,6 +480,9 @@ struct qcom_battmgr {
+ 	struct work_struct oplus_otg_work;
+ 	struct work_struct oplus_charging_work;
+ 	struct delayed_work charge_control_work;
++	struct delayed_work vooc_check_work;
++	struct work_struct vooc_event_work;
++	struct delayed_work vooc_handshake_work;
+ 
+ 	/*
+ 	 * @lock is used to prevent concurrent power supply requests to the
+@@ -1557,6 +1635,20 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
+ 			return;
+ 		case NOTIF_OPLUS_CID_DETECT:
+ 		case NOTIF_OPLUS_UFCS_DISABLE_MOS:
++		case NOTIF_OPLUS_CP_MOS_DISABLE:
++			return;
++		}
++	}
++
++	if (battmgr->oplus.vooc.supported) {
++		switch (notification) {
++		case NOTIF_OPLUS_VOOC_STATUS:
++			set_bit(OPLUS_VOOC_EV_STATUS, &battmgr->oplus.vooc.events);
++			schedule_work(&battmgr->vooc_event_work);
++			return;
++		case NOTIF_OPLUS_VOOC_HANDSHAKE:
++			set_bit(OPLUS_VOOC_EV_HANDSHAKE, &battmgr->oplus.vooc.events);
++			schedule_work(&battmgr->vooc_event_work);
+ 			return;
+ 		}
+ 	}
+@@ -1927,6 +2019,10 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
+ 			battmgr->usb.usb_type = qcom_battmgr_oplus_usb_type(
+ 						le32_to_cpu(resp->intval.value));
+ 			break;
++		case OPLUS_SM8550_USB_VOOCPHY_STATUS:
++		case OPLUS_SM8550_USB_VOOCPHY_ENABLE:
++			battmgr->oplus.value = le32_to_cpu(resp->intval.value);
++			break;
+ 		default:
+ 			dev_warn(battmgr->dev, "unknown property %#x\n", property);
+ 			break;
+@@ -2170,6 +2266,23 @@ static void qcom_battmgr_enable_worker(struct work_struct *work)
+ 					   OPLUS_SM8550_USB_OTG_AP_ENABLE, 1);
+ 		if (ret)
+ 			dev_err(battmgr->dev, "failed to enable OTG control from AP: %d\n", ret);
++
++		if (battmgr->oplus.vooc.supported) {
++			struct qcom_battmgr_vooc *vooc = &battmgr->oplus.vooc;
++
++			/*
++			 * A restarted firmware starts with voocphy off and no
++			 * suspend vote. Stay on the PMIC charger until the next
++			 * plug rather than resume a session it lost.
++			 */
++			vooc->blocked = vooc->service_seen;
++			vooc->service_seen = true;
++			vooc->enabled = false;
++			vooc->handshake = false;
++			vooc->ongoing = false;
++			vooc->buck_suspended = false;
++			mod_delayed_work(system_power_efficient_wq, &battmgr->vooc_check_work, 0);
++		}
+ 	}
+ 
+ 	if (battmgr->variant == OPLUS_BATTMGR_KAANAPALI) {
+@@ -2394,6 +2507,8 @@ static void qcom_battmgr_oplus_charging_worker(struct work_struct *work)
+ 
+ 	if (battmgr->variant == OPLUS_BATTMGR_SM8550) {
+ 		mod_delayed_work(system_power_efficient_wq, &battmgr->charge_control_work, 0);
++		if (battmgr->oplus.vooc.supported)
++			mod_delayed_work(system_power_efficient_wq, &battmgr->vooc_check_work, 0);
+ 		return;
+ 	}
+ 
+@@ -2447,6 +2562,319 @@ static void qcom_battmgr_charge_control_worker(struct work_struct *work)
+ 				 CHARGE_CTRL_POLL_INTERVAL);
+ }
+ 
++static bool vooc_allowed;
++module_param_named(vooc, vooc_allowed, bool, 0644);
++MODULE_PARM_DESC(vooc, "Allow SUPERVOOC on OnePlus SM8550 boards with USB connector thermistors");
++
++static unsigned int vooc_cool_down;
++module_param(vooc_cool_down, uint, 0644);
++MODULE_PARM_DESC(vooc_cool_down, "SUPERVOOC current level passed to the ADSP, 0 for its maximum");
++
++/*
++ * Called with @battmgr->lock held. The PMIC charger stays off while the
++ * ADSP's fast path charges or is being set up, as on stock.
++ */
++static int qcom_battmgr_vooc_update_buck(struct qcom_battmgr *battmgr)
++{
++	struct qcom_battmgr_vooc *vooc = &battmgr->oplus.vooc;
++	bool suspend = vooc->enabled && (vooc->handshake || vooc->ongoing);
++	int ret;
++
++	if (vooc->buck_suspended == suspend)
++		return 0;
++
++	ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
++					    USB_INPUT_CURR_LIMIT, suspend ? 0 : UINT_MAX);
++	if (!ret)
++		ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_SET,
++						    OPLUS_SM8550_BATT_CHG_EN,
++						    !suspend && !battmgr->oplus.charge_inhibited);
++	if (ret) {
++		dev_err(battmgr->dev, "failed to %s the PMIC charger: %d\n",
++			suspend ? "suspend" : "resume", ret);
++		return ret;
++	}
++
++	vooc->buck_suspended = suspend;
++	return 0;
++}
++
++/* Called with @battmgr->lock held. Returns why fast charging must stay off. */
++static const char *qcom_battmgr_vooc_veto(struct qcom_battmgr *battmgr, const int *port_mc)
++{
++	struct qcom_battmgr_vooc *vooc = &battmgr->oplus.vooc;
++	int batt_mc, i;
++
++	if (!READ_ONCE(vooc_allowed))
++		return "disabled";
++	if (vooc->blocked)
++		return "blocked until the next plug";
++	if (qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET, USB_ADAP_TYPE, 0) ||
++	    battmgr->usb.usb_type != POWER_SUPPLY_USB_TYPE_DCP)
++		return "not a DCP";
++	/* The limit worker polls every 30 s; fast charging cannot wait that long. */
++	if (battmgr->oplus.charge_inhibited)
++		return "charge limit reached";
++	if (battmgr->info.charge_ctrl_end && battmgr->info.charge_ctrl_end < 100 &&
++	    (qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET, BATT_CAPACITY, 0) ||
++	     battmgr->status.percent >= battmgr->info.charge_ctrl_end))
++		return "charge limit reached";
++	if (qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET, BATT_TEMP, 0))
++		return "battery temperature unavailable";
++	if (battmgr->status.temperature < OPLUS_VOOC_BATT_MIN_DECIDEGC ||
++	    battmgr->status.temperature >= OPLUS_VOOC_BATT_MAX_DECIDEGC)
++		return "battery temperature out of range";
++
++	batt_mc = battmgr->status.temperature * 100;
++	for (i = 0; i < ARRAY_SIZE(vooc->port); i++) {
++		if (port_mc[i] == INT_MIN)
++			return "connector temperature unavailable";
++		if (port_mc[i] >= OPLUS_VOOC_PORT_MAX_MILLIC ||
++		    port_mc[i] - batt_mc >= OPLUS_VOOC_PORT_GAP_MILLIC) {
++			vooc->blocked = true;
++			return "connector too hot";
++		}
++	}
++
++	return NULL;
++}
++
++/*
++ * Decide every few seconds while a charger is attached whether the ADSP may
++ * charge fast, and keep USB_VOOCPHY_ENABLE and the PMIC charger in line.
++ */
++static void qcom_battmgr_vooc_check_worker(struct work_struct *work)
++{
++	struct qcom_battmgr *battmgr = container_of(to_delayed_work(work),
++						    struct qcom_battmgr, vooc_check_work);
++	struct qcom_battmgr_vooc *vooc = &battmgr->oplus.vooc;
++	static const char * const names[] = { "usb_l", "usb_r" };
++	int port_mc[ARRAY_SIZE(vooc->port)];
++	const char *veto = NULL;
++	bool online = false, idle = false;
++	bool want;
++	int i, val, ret = 0;
++
++	mutex_lock(&battmgr->lock);
++	if (!battmgr->service_up || !vooc->supported)
++		goto out_unlock;
++	/* Nothing to undo: ask the firmware nothing, only watch for vooc=1. */
++	if (!READ_ONCE(vooc_allowed) && !vooc->enabled && !vooc->buck_suspended) {
++		idle = true;
++		goto out_unlock;
++	}
++
++	for (i = 0; i < ARRAY_SIZE(vooc->port); i++) {
++		/* The ADC may come up after this driver; see post-init-providers. */
++		if (!vooc->port[i]) {
++			struct iio_channel *chan = iio_channel_get(battmgr->dev, names[i]);
++
++			if (!IS_ERR(chan))
++				vooc->port[i] = chan;
++		}
++		/* Readings outside the NTC table mean an open or shorted sensor. */
++		port_mc[i] = INT_MIN;
++		if (vooc->port[i] &&
++		    iio_read_channel_processed(vooc->port[i], &val) >= 0 &&
++		    val >= -20000 && val <= 100000)
++			port_mc[i] = val;
++	}
++
++	ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET, USB_ONLINE, 0);
++	if (ret)
++		goto out_unlock;
++	online = battmgr->usb.online;
++
++	if (online) {
++		veto = qcom_battmgr_vooc_veto(battmgr, port_mc);
++	} else {
++		/* A new plug starts over. */
++		vooc->blocked = false;
++		vooc->retried = false;
++		veto = "no charger";
++	}
++	want = !veto;
++
++	ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET,
++					    OPLUS_SM8550_USB_VOOCPHY_ENABLE, 0);
++	if (ret)
++		goto out_unlock;
++	vooc->enabled = battmgr->oplus.value;
++
++	if (vooc->enabled != want) {
++		ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
++						    OPLUS_SM8550_USB_VOOCPHY_ENABLE, want);
++		if (ret) {
++			dev_err(battmgr->dev, "failed to switch SUPERVOOC: %d\n", ret);
++			goto out_unlock;
++		}
++		vooc->enabled = want;
++		if (want)
++			dev_info(battmgr->dev, "SUPERVOOC enabled\n");
++		else
++			dev_info(battmgr->dev, "SUPERVOOC disabled: %s\n", veto);
++	}
++
++	dev_dbg(battmgr->dev, "SUPERVOOC %s, voocphy %d, connector %d/%d mC\n",
++		veto ?: "allowed", vooc->enabled, port_mc[0], port_mc[1]);
++
++	if (!vooc->enabled) {
++		vooc->handshake = false;
++		vooc->ongoing = false;
++	}
++	qcom_battmgr_vooc_update_buck(battmgr);
++
++	/* Stock reports the charging temperature to the ADSP's current tables. */
++	if (vooc->enabled)
++		qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_SET,
++					      OPLUS_SM8550_BATT_SET_MATCH_TEMP,
++					      battmgr->status.temperature);
++out_unlock:
++	mutex_unlock(&battmgr->lock);
++	/* Unplugged with nothing to watch: the next plug event restarts this. */
++	if (online || ret || idle)
++		mod_delayed_work(system_power_efficient_wq, &battmgr->vooc_check_work,
++				 OPLUS_VOOC_CHECK_INTERVAL);
++}
++
++/* Called with @battmgr->lock held. */
++static void qcom_battmgr_vooc_status(struct qcom_battmgr *battmgr, u32 status)
++{
++	struct qcom_battmgr_vooc *vooc = &battmgr->oplus.vooc;
++	unsigned int code = status & 0xff;
++	unsigned int reason = (status >> 16) & 0xff;
++
++	dev_info(battmgr->dev, "SUPERVOOC status %#x\n", status);
++
++	switch (code) {
++	case OPLUS_VOOC_PRESENT:
++	case OPLUS_VOOC_DUMMY_START:
++		/* Still setting up: the handshake timeout keeps running. */
++		break;
++	case OPLUS_VOOC_ONGOING:
++		vooc->handshake = false;
++		vooc->ongoing = true;
++		break;
++	case OPLUS_VOOC_FULL:
++		if (reason == OPLUS_VOOC_BTB_TEMP_OVER || reason == OPLUS_VOOC_HW_VBATT_HIGH ||
++		    reason == OPLUS_VOOC_HW_TBATT_HIGH)
++			vooc->blocked = true;
++		fallthrough;
++	case OPLUS_VOOC_ABSENT:
++	case OPLUS_VOOC_BATT_TEMP_OVER:
++	case OPLUS_VOOC_SWITCH_TEMP_RANGE:
++		vooc->handshake = false;
++		vooc->ongoing = false;
++		break;
++	default:
++		/* Bad connection, adapter or link errors, hardware limits: no retry. */
++		vooc->handshake = false;
++		vooc->ongoing = false;
++		vooc->blocked = true;
++		break;
++	}
++
++	if (code == OPLUS_VOOC_PRESENT || code == OPLUS_VOOC_ONGOING)
++		qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_SET,
++					      OPLUS_SM8550_BATT_SET_COOL_DOWN,
++					      READ_ONCE(vooc_cool_down));
++}
++
++static void qcom_battmgr_vooc_event_worker(struct work_struct *work)
++{
++	struct qcom_battmgr *battmgr = container_of(work, struct qcom_battmgr, vooc_event_work);
++	struct qcom_battmgr_vooc *vooc = &battmgr->oplus.vooc;
++
++	mutex_lock(&battmgr->lock);
++	/* The adapter answered: stock hands charging to the ADSP. */
++	if (test_and_clear_bit(OPLUS_VOOC_EV_HANDSHAKE, &vooc->events) && vooc->enabled) {
++		vooc->handshake = true;
++		mod_delayed_work(system_power_efficient_wq, &battmgr->vooc_handshake_work,
++				 msecs_to_jiffies(OPLUS_VOOC_HANDSHAKE_MS));
++	}
++
++	if (test_and_clear_bit(OPLUS_VOOC_EV_STATUS, &vooc->events) &&
++	    !qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET,
++					   OPLUS_SM8550_USB_VOOCPHY_STATUS, 0))
++		qcom_battmgr_vooc_status(battmgr, battmgr->oplus.value);
++
++	qcom_battmgr_vooc_update_buck(battmgr);
++	mutex_unlock(&battmgr->lock);
++
++	/* A block or a dropped session turns voocphy off at once. */
++	mod_delayed_work(system_power_efficient_wq, &battmgr->vooc_check_work, 0);
++}
++
++/* No fast path 8.5 s after the handshake started: retry once, as stock does. */
++static void qcom_battmgr_vooc_handshake_worker(struct work_struct *work)
++{
++	struct qcom_battmgr *battmgr = container_of(to_delayed_work(work),
++						    struct qcom_battmgr, vooc_handshake_work);
++	struct qcom_battmgr_vooc *vooc = &battmgr->oplus.vooc;
++	bool retry;
++
++	mutex_lock(&battmgr->lock);
++	if (!vooc->handshake || vooc->ongoing) {
++		mutex_unlock(&battmgr->lock);
++		return;
++	}
++	retry = !vooc->retried;
++	vooc->retried = true;
++	if (!retry)
++		vooc->blocked = true;
++	mutex_unlock(&battmgr->lock);
++
++	dev_warn(battmgr->dev, "SUPERVOOC handshake timed out%s\n", retry ? ", retrying" : "");
++	/* Stock keeps the PMIC charger off for another second before the retry. */
++	if (retry)
++		msleep(1000);
++
++	mutex_lock(&battmgr->lock);
++	vooc->handshake = false;
++	qcom_battmgr_vooc_update_buck(battmgr);
++	if (retry && vooc->enabled)
++		qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
++					      OPLUS_SM8550_USB_VOOCPHY_RESET_AGAIN, 1);
++	mutex_unlock(&battmgr->lock);
++
++	mod_delayed_work(system_power_efficient_wq, &battmgr->vooc_check_work, 0);
++}
++
++/* Leave the ADSP on its own charger rather than in a session nobody watches. */
++static void qcom_battmgr_vooc_teardown(void *data)
++{
++	struct qcom_battmgr *battmgr = data;
++	struct qcom_battmgr_vooc *vooc = &battmgr->oplus.vooc;
++
++	mutex_lock(&battmgr->lock);
++	vooc->supported = false;
++	mutex_unlock(&battmgr->lock);
++
++	/* In this order: each may queue the next. */
++	cancel_delayed_work_sync(&battmgr->vooc_handshake_work);
++	cancel_work_sync(&battmgr->vooc_event_work);
++	cancel_delayed_work_sync(&battmgr->vooc_check_work);
++
++	mutex_lock(&battmgr->lock);
++	if (battmgr->service_up && (vooc->enabled || vooc->buck_suspended) &&
++	    !qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
++					   OPLUS_SM8550_USB_VOOCPHY_ENABLE, 0)) {
++		vooc->enabled = false;
++		qcom_battmgr_vooc_update_buck(battmgr);
++	}
++	mutex_unlock(&battmgr->lock);
++}
++
++static void qcom_battmgr_vooc_release(void *data)
++{
++	struct qcom_battmgr_vooc *vooc = data;
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(vooc->port); i++)
++		if (vooc->port[i])
++			iio_channel_release(vooc->port[i]);
++}
++
+ static void qcom_battmgr_pdr_notify(void *priv, int state)
+ {
+ 	struct qcom_battmgr *battmgr = priv;
+@@ -2575,6 +3003,15 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
+ 					     "failed to register wireless charing power supply\n");
+ 	}
+ 
++	if (battmgr->variant == OPLUS_BATTMGR_SM8550 &&
++	    device_property_match_string(dev, "io-channel-names", "usb_l") >= 0) {
++		battmgr->oplus.vooc.supported = true;
++		/* Ahead of the works, so they are cancelled before the channels go. */
++		ret = devm_add_action(dev, qcom_battmgr_vooc_release, &battmgr->oplus.vooc);
++		if (ret)
++			return ret;
++	}
++
+ 	ret = devm_work_autocancel(dev, &battmgr->enable_work,
+ 				   qcom_battmgr_enable_worker);
+ 	if (ret)
+@@ -2595,6 +3032,21 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
+ 	if (ret)
+ 		return ret;
+ 
++	ret = devm_delayed_work_autocancel(dev, &battmgr->vooc_check_work,
++					   qcom_battmgr_vooc_check_worker);
++	if (ret)
++		return ret;
++
++	ret = devm_work_autocancel(dev, &battmgr->vooc_event_work,
++				   qcom_battmgr_vooc_event_worker);
++	if (ret)
++		return ret;
++
++	ret = devm_delayed_work_autocancel(dev, &battmgr->vooc_handshake_work,
++					   qcom_battmgr_vooc_handshake_worker);
++	if (ret)
++		return ret;
++
+ 	battmgr->client = devm_pmic_glink_client_alloc(dev, PMIC_GLINK_OWNER_BATTMGR,
+ 						       qcom_battmgr_callback,
+ 						       qcom_battmgr_pdr_notify,
+@@ -2602,6 +3054,13 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
+ 	if (IS_ERR(battmgr->client))
+ 		return PTR_ERR(battmgr->client);
+ 
++	/* After the client, so it can still talk to the firmware. */
++	if (battmgr->oplus.vooc.supported) {
++		ret = devm_add_action(dev, qcom_battmgr_vooc_teardown, battmgr);
++		if (ret)
++			return ret;
++	}
++
+ 	/* After the client, so the cooling device goes away before it. */
+ 	ret = qcom_battmgr_charge_limit_init(battmgr);
+ 	if (ret)
+@@ -2628,3 +3087,4 @@ module_auxiliary_driver(qcom_battmgr_driver);
+ 
+ MODULE_DESCRIPTION("Qualcomm PMIC GLINK battery manager driver");
+ MODULE_LICENSE("GPL");
++MODULE_IMPORT_NS("IIO_CONSUMER");

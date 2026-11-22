@@ -1,0 +1,209 @@
+Description: Allow VA-API H.264 encoders that emit in-band headers (VA_ENC_PACKED_HEADER_NONE)
+ Stateful V4L2 M2M VA-API backends such as qcom-va-driver (Qualcomm Iris)
+ generate SPS, PPS, and slice headers in firmware and therefore report
+ VAConfigAttribEncPackedHeaders == VA_ENC_PACKED_HEADER_NONE. They also do
+ not implement the stateless VAEncMiscParameterTypeSubMbPartPel hint.
+ .
+ Accept VA_ENC_PACKED_HEADER_NONE alongside the full packed-header set,
+ pass VA_ENC_PACKED_HEADER_NONE to vaCreateConfig, omit packed header and
+ SubMbPartPel misc buffers when the driver emits in-band headers, and reserve
+ MAX_HEADER_SIZE in the coded output buffer.
+Author: Salami Local Build
+Origin: other, local Qualcomm Iris VA-API enablement for GNOME Remote Desktop 50.2
+Forwarded: no
+Last-Update: 2026-11-21
+
+--- a/src/grd-hwaccel-vaapi.c
++++ b/src/grd-hwaccel-vaapi.c
+@@ -42,6 +42,7 @@
+ 
+   VAEntrypoint va_entrypoint;
+   gboolean supports_quality_level;
++  gboolean supports_packed_headers;
+ };
+ 
+ G_DEFINE_TYPE (GrdHwAccelVaapi, grd_hwaccel_vaapi, G_TYPE_OBJECT)
+@@ -57,6 +58,7 @@
+                                                             hwaccel_vaapi->va_display,
+                                                             hwaccel_vaapi->va_entrypoint,
+                                                             hwaccel_vaapi->supports_quality_level,
++                                                            hwaccel_vaapi->supports_packed_headers,
+                                                             source_width, source_height,
+                                                             refresh_rate, error);
+ }
+@@ -254,18 +256,36 @@
+       return FALSE;
+     }
+ 
+-  g_assert (attributes[3].type == VAConfigAttribEncPackedHeaders);
+-  if (attributes[3].value == VA_ATTRIB_NOT_SUPPORTED ||
+-      !(attributes[3].value & VA_ENC_PACKED_HEADER_SEQUENCE) ||
+-      !(attributes[3].value & VA_ENC_PACKED_HEADER_PICTURE) ||
+-      !(attributes[3].value & VA_ENC_PACKED_HEADER_SLICE) ||
+-      !(attributes[3].value & VA_ENC_PACKED_HEADER_RAW_DATA))
+-    {
+-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+-                   "Unsuitable device, device does not support required packed "
+-                   "headers (only supports 0x%08X)", attributes[3].value);
+-      return FALSE;
+-    }
++  {
++    const uint32_t required_packed_headers =
++      VA_ENC_PACKED_HEADER_SEQUENCE |
++      VA_ENC_PACKED_HEADER_PICTURE |
++      VA_ENC_PACKED_HEADER_SLICE |
++      VA_ENC_PACKED_HEADER_RAW_DATA;
++
++    g_assert (attributes[3].type == VAConfigAttribEncPackedHeaders);
++    if (attributes[3].value == VA_ATTRIB_NOT_SUPPORTED)
++      {
++        g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
++                     "Unsuitable device, invalid packed headers attribute");
++        return FALSE;
++      }
++    if ((attributes[3].value & required_packed_headers) == required_packed_headers)
++      {
++        hwaccel_vaapi->supports_packed_headers = TRUE;
++      }
++    else if (attributes[3].value == VA_ENC_PACKED_HEADER_NONE)
++      {
++        hwaccel_vaapi->supports_packed_headers = FALSE;
++      }
++    else
++      {
++        g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
++                     "Unsuitable device, device does not support required packed "
++                     "headers (only supports 0x%08X)", attributes[3].value);
++        return FALSE;
++      }
++  }
+ 
+   g_debug ("[HWAccel.VAAPI] Using VAEntrypoint %i for profile "
+            "VAProfileH264High", entrypoint);
+--- a/src/grd-encode-session-vaapi.h
++++ b/src/grd-encode-session-vaapi.h
+@@ -31,6 +31,7 @@
+                                                      VADisplay      va_display,
+                                                      VAEntrypoint   va_entrypoint,
+                                                      gboolean       supports_quality_level,
++                                                     gboolean       supports_packed_headers,
+                                                      uint32_t       source_width,
+                                                      uint32_t       source_height,
+                                                      uint32_t       refresh_rate,
+--- a/src/grd-encode-session-vaapi.c
++++ b/src/grd-encode-session-vaapi.c
+@@ -124,6 +124,7 @@
+   VADisplay va_display;
+ 
+   gboolean supports_quality_level;
++  gboolean supports_packed_headers;
+   gboolean debug_va_times;
+ 
+   VAConfigID va_config;
+@@ -614,6 +615,9 @@
+   g_autofree uint8_t *header_data = NULL;
+   uint32_t header_length = 0;
+ 
++  if (!encode_session_vaapi->supports_packed_headers)
++    return TRUE;
++
+   header_data = grd_nal_writer_get_aud_bitstream (nal_writer, &header_length);
+   if (!create_packed_header_buffers (encode_session_vaapi, h264_frame,
+                                      VAEncPackedHeaderRawData,
+@@ -718,6 +722,9 @@
+   if (!create_sequence_buffer (encode_session_vaapi, h264_frame, error))
+     return FALSE;
+ 
++  if (!encode_session_vaapi->supports_packed_headers)
++    return TRUE;
++
+   header_data = grd_nal_writer_get_sps_bitstream (nal_writer, sequence_param,
+                                                   &header_length);
+   if (!create_packed_header_buffers (encode_session_vaapi, h264_frame,
+@@ -874,7 +881,8 @@
+       encode_session_vaapi->supports_quality_level &&
+       !ensure_misc_param_quality_level (encode_session_vaapi, h264_frame, error))
+     return FALSE;
+-  if (!ensure_misc_param_sub_mb_part_pel_h264 (encode_session_vaapi, h264_frame,
++  if (encode_session_vaapi->supports_packed_headers &&
++      !ensure_misc_param_sub_mb_part_pel_h264 (encode_session_vaapi, h264_frame,
+                                                error))
+     return FALSE;
+ 
+@@ -951,7 +959,7 @@
+   *picture_param = (VAEncPictureParameterBufferH264) {};
+   fill_avc_picture (encode_session_vaapi, picture_param, h264_frame);
+ 
+-  if (!picture->is_idr)
++  if (!picture->is_idr || !encode_session_vaapi->supports_packed_headers)
+     return TRUE;
+ 
+   header_data = grd_nal_writer_get_pps_bitstream (nal_writer, picture_param,
+@@ -1070,6 +1078,9 @@
+                             error))
+     return FALSE;
+ 
++  if (!encode_session_vaapi->supports_packed_headers)
++    return TRUE;
++
+   header_data =
+     grd_nal_writer_get_slice_header_bitstream (nal_writer, &slice_param,
+                                                &encode_session_vaapi->sequence_param,
+@@ -1110,11 +1121,18 @@
+ 
+   bitstream_buffer_size = width_in_mbs * height_in_mbs * 400;
+ 
+-  header_lengths += h264_frame->aud_header_length;
+-  header_lengths += h264_frame->sequence_header_length;
+-  header_lengths += h264_frame->picture_header_length;
+-  header_lengths += h264_frame->slice_header_length;
+-  bitstream_buffer_size += (header_lengths + 7) / 8;
++  if (encode_session_vaapi->supports_packed_headers)
++    {
++      header_lengths += h264_frame->aud_header_length;
++      header_lengths += h264_frame->sequence_header_length;
++      header_lengths += h264_frame->picture_header_length;
++      header_lengths += h264_frame->slice_header_length;
++      bitstream_buffer_size += (header_lengths + 7) / 8;
++    }
++  else
++    {
++      bitstream_buffer_size += MAX_HEADER_SIZE;
++    }
+ 
+   va_status = vaCreateBuffer (encode_session_vaapi->va_display,
+                               encode_session_vaapi->va_context,
+@@ -1696,10 +1714,13 @@
+   config_attributes[1].value = VA_RC_CQP;
+ 
+   config_attributes[2].type = VAConfigAttribEncPackedHeaders;
+-  config_attributes[2].value = VA_ENC_PACKED_HEADER_SEQUENCE |
+-                               VA_ENC_PACKED_HEADER_PICTURE |
+-                               VA_ENC_PACKED_HEADER_SLICE |
+-                               VA_ENC_PACKED_HEADER_RAW_DATA;
++  config_attributes[2].value =
++    encode_session_vaapi->supports_packed_headers
++      ? (VA_ENC_PACKED_HEADER_SEQUENCE |
++         VA_ENC_PACKED_HEADER_PICTURE |
++         VA_ENC_PACKED_HEADER_SLICE |
++         VA_ENC_PACKED_HEADER_RAW_DATA)
++      : VA_ENC_PACKED_HEADER_NONE;
+ 
+   va_status = vaCreateConfig (encode_session_vaapi->va_display,
+                               VAProfileH264High, va_entrypoint,
+@@ -1793,6 +1814,7 @@
+                               VADisplay      va_display,
+                               VAEntrypoint   va_entrypoint,
+                               gboolean       supports_quality_level,
++                              gboolean       supports_packed_headers,
+                               uint32_t       source_width,
+                               uint32_t       source_height,
+                               uint32_t       refresh_rate,
+@@ -1805,6 +1827,7 @@
+   encode_session_vaapi->vk_device = vk_device;
+   encode_session_vaapi->va_display = va_display;
+   encode_session_vaapi->supports_quality_level = supports_quality_level;
++  encode_session_vaapi->supports_packed_headers = supports_packed_headers;
+ 
+   encode_session_vaapi->surface_width = grd_get_aligned_size (source_width, 32);
+   encode_session_vaapi->surface_height = grd_get_aligned_size (source_height, 16);

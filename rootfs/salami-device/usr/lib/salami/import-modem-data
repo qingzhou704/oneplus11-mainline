@@ -1,0 +1,83 @@
+#!/bin/sh
+# Copy this phone's own DSP/modem firmware (slot a's modem partition) and modem EFS into the
+# root filesystem, once. Neither is redistributable, so the rootfs ships without them.
+# The EFS partitions are only read; rmtfs then works on the copies.
+set -eu
+fw=/usr/lib/firmware/qcom/sm8550/oneplus/salami
+efs=/var/lib/rmtfs
+
+# Copy each requested firmware group into $fw.tmp then move into shared $fw, publishing $marker
+# last because salami-import-gpu-firmware also writes into $fw.
+stage_modem_group() {
+    marker=$1
+    shift
+    rm -rf "$fw.tmp"
+    mkdir -p "$fw.tmp" "$fw"
+    # Unquoted $* intentional so caller-supplied globs expand inside $m/image.
+    (cd "$m/image" && cp -r $* "$fw.tmp/") || return 1
+    for f in "$fw.tmp"/*; do
+        n=${f##*/}
+        [ "$n" = "$marker" ] && continue
+        rm -rf "$fw/$n"
+        mv "$f" "$fw/"
+    done
+    mv "$fw.tmp/$marker" "$fw/"
+    rmdir "$fw.tmp"
+}
+
+need_adsp=0
+need_cdsp=0
+[ ! -e "$fw/adsp.mdt" ] && need_adsp=1
+[ ! -e "$fw/cdsp.mdt" ] && need_cdsp=1
+
+if [ "$need_adsp" -eq 1 ] || [ "$need_cdsp" -eq 1 ]; then
+    m=$(mktemp -d)
+    mount -o ro /dev/disk/by-partlabel/modem_a "$m"
+    ok=1
+    if [ "$need_adsp" -eq 1 ]; then
+        stage_modem_group adsp.mdt "adsp* modem* ipa_fws* ./*.jsn" || ok=0
+    fi
+    if [ "$ok" -eq 1 ] && [ "$need_cdsp" -eq 1 ]; then
+        stage_modem_group cdsp.mdt "cdsp*" || ok=0
+    fi
+    umount "$m"
+    rmdir "$m"
+    [ "$ok" -eq 1 ] || exit 1
+    # A remoteproc that probed before the copy stayed offline; the modem waits for rmtfs.
+    for r in /sys/class/remoteproc/remoteproc*; do
+        case "$(cat "$r/firmware" 2>/dev/null)" in
+            qcom/sm8550/oneplus/salami/adsp.mdt|qcom/sm8550/oneplus/salami/cdsp.mdt)
+                if [ "$(cat "$r/state" 2>/dev/null)" = offline ]; then
+                    echo start > "$r/state"
+                fi
+                ;;
+        esac
+    done
+fi
+
+if [ ! -e "$efs/modem_fs1" ]; then
+    rm -rf "$efs.tmp"; mkdir -p "$efs.tmp" "$efs"
+    for p in modemst1:modem_fs1 modemst2:modem_fs2 fsg:modem_fsg fsc:modem_fsc; do
+        cat "/dev/disk/by-partlabel/${p%%:*}" > "$efs.tmp/${p#*:}"
+    done
+    chmod 600 "$efs.tmp"/*
+    # Move entries in rather than renaming the directory: $efs may already exist (rmtfs or an
+    # operator created it), and `mv dir existingdir` would nest the files one level too deep.
+    # modem_fs1 goes last and marks a complete copy.
+    for f in "$efs.tmp"/*; do
+        n=${f##*/}
+        [ "$n" = modem_fs1 ] && continue
+        mv "$f" "$efs/"
+    done
+    mv "$efs.tmp/modem_fs1" "$efs/"
+    rmdir "$efs.tmp"
+fi
+
+# The modem also requests OnePlus's OEM NV backups. Serve file copies, like EFS.
+for p in oplusstanvbk_a:oem_stanvbk oplusdycnvbk:oem_dycnvbk; do
+    file=$efs/${p#*:}
+    if [ ! -e "$file" ]; then
+        (umask 077; cat "/dev/disk/by-partlabel/${p%%:*}" > "$file.tmp")
+        mv "$file.tmp" "$file"
+    fi
+done
