@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
@@ -10,27 +11,42 @@ import * as QuickSettings from 'resource:///org/gnome/shell/ui/quickSettings.js'
 import {ScreenShield} from 'resource:///org/gnome/shell/ui/screenShield.js';
 import {Indicator as NetworkIndicator} from 'resource:///org/gnome/shell/ui/status/network.js';
 
+const SALAMI_CTL = '/usr/bin/salami-ctl';
 const REMOTE_AUTOLOGIN_USER_PATH = '/etc/salami/remote-autologin-user';
 const BAT_DIR = '/sys/class/power_supply/qcom-battmgr-bat';
 const TORCH_DIR = '/sys/class/leds/white:flash-0';
 const CPUFREQ_DIR = '/sys/devices/system/cpu/cpufreq';
-const GPU_DEVFREQ_DIR = '/sys/class/devfreq/3d00000.gpu';
 const DEFAULT_TORCH_LEVEL = 64;
-const ECO_MAX_KHZ = {
-    policy0: 1555200,
-    policy3: 1785600,
-    policy7: 1843200,
-};
-const GPU_PROFILE_HZ = {
-    eco: [220000000, 401000000],
-    balanced: [220000000, 680000000],
-    performance: [401000000, 680000000],
-};
 const PERF_MODES = [
     {id: 'eco', label: '节能静音 (≤1.84 GHz)', short: '节能静音', icon: 'power-profile-power-saver-symbolic'},
     {id: 'balanced', label: '日常均衡 (默认动态)', short: '日常均衡', icon: 'power-profile-balanced-symbolic'},
     {id: 'performance', label: '满血性能 (3.19 GHz 睿频)', short: '满血性能', icon: 'power-profile-performance-symbolic'},
 ];
+
+function runCtlAsync(args, onDone = null, cancellable = null) {
+    try {
+        const proc = Gio.Subprocess.new(
+            [SALAMI_CTL, ...args],
+            Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
+        );
+        proc.communicate_utf8_async(null, cancellable, (p, res) => {
+            try {
+                const [, stdout, stderr] = p.communicate_utf8_finish(res);
+                if (cancellable?.is_cancelled())
+                    return;
+                onDone?.(p.get_successful(), (stdout ?? '').trim(), (stderr ?? '').trim());
+            } catch (e) {
+                if (cancellable?.is_cancelled() ||
+                    e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                    return;
+                onDone?.(false, '', String(e));
+            }
+        });
+    } catch (e) {
+        if (!cancellable?.is_cancelled())
+            onDone?.(false, '', String(e));
+    }
+}
 
 function readTextFile(path) {
     try {
@@ -82,69 +98,6 @@ function detectPerfMode() {
     if (capped)
         return 'eco';
     return 'balanced';
-}
-
-function applyPerfMode(mode) {
-    const boostPath = `${CPUFREQ_DIR}/boost`;
-    if (GLib.file_test(boostPath, GLib.FileTest.IS_REGULAR))
-        writeSysfs(boostPath, mode === 'performance' ? 1 : 0);
-    const gov = mode === 'performance' ? 'performance' : 'schedutil';
-    for (const name of ['policy0', 'policy3', 'policy7']) {
-        const dir = `${CPUFREQ_DIR}/${name}`;
-        let hwMax = readIntFile(`${dir}/cpuinfo_max_freq`);
-        if (hwMax === null)
-            continue;
-        if (mode === 'performance') {
-            const boostRaw = readTextFile(`${dir}/scaling_boost_frequencies`) ?? '';
-            for (const tok of boostRaw.split(/\s+/)) {
-                const bf = Number.parseInt(tok, 10);
-                if (!Number.isNaN(bf) && bf > hwMax)
-                    hwMax = bf;
-            }
-        }
-        const targetMax = mode === 'eco'
-            ? Math.min(hwMax, ECO_MAX_KHZ[name] ?? hwMax)
-            : hwMax;
-        writeSysfs(`${dir}/scaling_max_freq`, targetMax);
-        writeSysfs(`${dir}/scaling_governor`, gov);
-    }
-    const gpuMinPath = `${GPU_DEVFREQ_DIR}/min_freq`;
-    const gpuMaxPath = `${GPU_DEVFREQ_DIR}/max_freq`;
-    if (GLib.file_test(gpuMinPath, GLib.FileTest.IS_REGULAR) &&
-        GLib.file_test(gpuMaxPath, GLib.FileTest.IS_REGULAR)) {
-        const [gMin, gMax] = GPU_PROFILE_HZ[mode] ?? GPU_PROFILE_HZ.balanced;
-        const curMax = readIntFile(gpuMaxPath, 680000000) ?? 680000000;
-        const curMin = readIntFile(gpuMinPath, 220000000) ?? 220000000;
-        if (gMin > curMax) {
-            writeSysfs(gpuMaxPath, gMax);
-            writeSysfs(gpuMinPath, gMin);
-        } else if (gMax < curMin) {
-            writeSysfs(gpuMinPath, gMin);
-            writeSysfs(gpuMaxPath, gMax);
-        } else {
-            writeSysfs(gpuMaxPath, gMax);
-            writeSysfs(gpuMinPath, gMin);
-        }
-    }
-}
-
-function setChargeThresholds(limit) {
-    const start = Math.max(0, limit - 5);
-    const startPath = `${BAT_DIR}/charge_control_start_threshold`;
-    const endPath = `${BAT_DIR}/charge_control_end_threshold`;
-    const curStart = readIntFile(startPath, 0) ?? 0;
-    const curEnd = readIntFile(endPath, 100) ?? 100;
-
-    if (limit >= curEnd && start > curEnd) {
-        writeSysfs(endPath, limit);
-        writeSysfs(startPath, start);
-    } else if (limit < curStart) {
-        writeSysfs(startPath, start);
-        writeSysfs(endPath, limit);
-    } else {
-        writeSysfs(endPath, limit);
-        writeSysfs(startPath, start);
-    }
 }
 
 function readRemoteAutoLoginUser() {
@@ -264,6 +217,8 @@ class SalamiPerfMenuToggle extends QuickSettings.QuickMenuToggle {
             iconName: 'power-profile-balanced-symbolic',
             toggleMode: false,
         });
+        this._destroyed = false;
+        this._cancellable = new Gio.Cancellable();
         this.menu.setHeader('power-profile-balanced-symbolic', 'SoC 性能档位');
         this._modeItems = new Map();
         for (const entry of PERF_MODES) {
@@ -282,15 +237,18 @@ class SalamiPerfMenuToggle extends QuickSettings.QuickMenuToggle {
     }
 
     _selectMode(mode) {
-        try {
-            applyPerfMode(mode);
-        } catch (e) {
-            console.warn(`salami-osk-guard: failed to set perf mode: ${e}`);
-        }
-        this.refreshState();
+        runCtlAsync(['perf', mode], (ok, _out, err) => {
+            if (this._destroyed)
+                return;
+            if (!ok)
+                console.warn(`salami-osk-guard: failed to set perf mode: ${err}`);
+            this.refreshState();
+        }, this._cancellable);
     }
 
     refreshState() {
+        if (this._destroyed)
+            return;
         const cur = detectPerfMode();
         const meta = PERF_MODES.find(m => m.id === cur) ?? PERF_MODES[1];
         this.iconName = meta.icon;
@@ -302,6 +260,15 @@ class SalamiPerfMenuToggle extends QuickSettings.QuickMenuToggle {
                 : PopupMenu.Ornament.NONE);
         }
     }
+
+    destroy() {
+        this._destroyed = true;
+        if (this._cancellable) {
+            this._cancellable.cancel();
+            this._cancellable = null;
+        }
+        super.destroy();
+    }
 });
 
 const SalamiChargeToggle = GObject.registerClass(
@@ -312,19 +279,25 @@ class SalamiChargeToggle extends QuickSettings.QuickToggle {
             iconName: 'battery-good-charging-symbolic',
             toggleMode: false,
         });
+        this._destroyed = false;
+        this._cancellable = new Gio.Cancellable();
         this.connect('clicked', () => {
             const nextLimit = this.checked ? 100 : 80;
-            try {
-                setChargeThresholds(nextLimit);
-            } catch (e) {
-                console.warn(`salami-osk-guard: failed to set charge limit: ${e}`);
-            }
-            this.refreshState();
+            // Delegate to salami-ctl so any active salami-charge-restore.timer is also cancelled.
+            runCtlAsync(['charge', String(nextLimit)], (ok, _out, err) => {
+                if (this._destroyed)
+                    return;
+                if (!ok)
+                    console.warn(`salami-osk-guard: failed to set charge limit: ${err}`);
+                this.refreshState();
+            }, this._cancellable);
         });
         this.refreshState();
     }
 
     refreshState() {
+        if (this._destroyed)
+            return;
         const end = readIntFile(`${BAT_DIR}/charge_control_end_threshold`, 80) ?? 80;
         const cap = readIntFile(`${BAT_DIR}/capacity`);
         const pUw = readIntFile(`${BAT_DIR}/power_now`, 0) ?? 0;
@@ -340,6 +313,15 @@ class SalamiChargeToggle extends QuickSettings.QuickToggle {
             this.subtitle = `${capPrefix}${watts.toFixed(1)} W`;
         else
             this.subtitle = `${capPrefix}${limited ? '护航 75–80%' : '100% 满充'}`;
+    }
+
+    destroy() {
+        this._destroyed = true;
+        if (this._cancellable) {
+            this._cancellable.cancel();
+            this._cancellable = null;
+        }
+        super.destroy();
     }
 });
 

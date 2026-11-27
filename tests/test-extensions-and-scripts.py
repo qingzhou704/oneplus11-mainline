@@ -51,6 +51,53 @@ class ExtensionsAndScriptsTests(unittest.TestCase):
                 )
                 self.assertEqual(res.returncode, 0, f"JS syntax error in {ext_dir.name}: {res.stderr}")
 
+        cc_js = (EXT_ROOT / "salami-control-center@oneplus11/extension.js").read_text(encoding="utf-8")
+        self.assertIn("Gio.Cancellable", cc_js)
+        self.assertIn("this._destroyed = true", cc_js)
+
+        osk_js = (EXT_ROOT / "salami-osk-guard@oneplus11/extension.js").read_text(encoding="utf-8")
+        self.assertIn("SALAMI_CTL", osk_js)
+        self.assertNotIn("ECO_MAX_KHZ", osk_js)
+        self.assertNotIn("setChargeThresholds", osk_js)
+
+    def test_security_rules_and_ci_build_invariants(self):
+        iris_rule = (REPO / "rootfs/salami-device/usr/lib/udev/rules.d/73-salami-iris-video.rules").read_text(encoding="utf-8")
+        self.assertIn('MODE="0660"', iris_rule)
+        self.assertNotIn('MODE="0666"', iris_rule)
+
+        polkit_rule = (REPO / "rootfs/salami-device/usr/share/polkit-1/rules.d/51-salami-hardware-admin.rules").read_text(encoding="utf-8")
+        self.assertIn('action.lookup("command_line")', polkit_rule)
+        self.assertNotIn("service", polkit_rule.split("var allowed =", 1)[1])
+
+        release_yml = (REPO / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertNotIn('CROSS_COMPILE="ccache ', release_yml)
+        self.assertIn('CROSS_COMPILE="aarch64-linux-gnu-"', release_yml)
+        self.assertNotIn('lv="${{ inputs.', release_yml)
+        self.assertNotIn('tag="${{ inputs.', release_yml)
+        self.assertIn("tests/test-salami-ctl.py", release_yml)
+
+        build_rootfs = (REPO / "tools/build-rootfs.sh").read_text(encoding="utf-8")
+        self.assertIn("rtkit", build_rootfs)
+        self.assertIn("mobile-broadband-provider-info", build_rootfs)
+
+        build_kernel = (REPO / "tools/build-kernel.sh").read_text(encoding="utf-8")
+        self.assertNotIn('>> "$b/arch/arm64/boot/Image"', build_kernel)
+        self.assertIn("Image-dtb", build_kernel)
+
+        build_initramfs = (REPO / "tools/build-full-initramfs.sh").read_text(encoding="utf-8")
+        self.assertIn('command -v xz', build_initramfs)
+
+        desktop_custom = (REPO / "tools/desktop-customize.sh").read_text(encoding="utf-8")
+        self.assertIn("ssh@.service.d/50-salami-hostkeys.conf", desktop_custom)
+
+        build_deb = (REPO / "tools/build-device-deb.sh").read_text(encoding="utf-8")
+        self.assertIn("DEBIAN/conffiles", build_deb)
+
+        self.assertFalse(
+            (REPO / "rootfs/salami-device/usr/lib/systemd/system/cloudflared.service.d").exists(),
+            "cloudflared drop-in should not remain in public salami-device package",
+        )
+
     def test_posix_shell_scripts_syntax(self):
         sh_files: list[Path] = []
         sh_files.extend(sorted((REPO / "tools").glob("*.sh")))

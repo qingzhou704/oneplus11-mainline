@@ -13,7 +13,8 @@ for p in \
     "$here/patches/kernel-067-v2-vooc-bbr.patch" \
     "$here/patches/kernel-067-v3-display-hbm-netfilter.patch" \
     "$here/patches/kernel-067-v4-touch-vooc-modules.patch" \
-    "$here/patches/kernel-068-linux-7.3.5-rollup.patch"
+    "$here/patches/kernel-068-linux-7.3.5-rollup.patch" \
+    "$here/patches/kernel-069-panel-vooc-fixes.patch"
 do
     [ -f "$p" ] || { echo "missing patch: $p" >&2; exit 2; }
     GIT_COMMITTER_NAME="OnePlus 11 mainline port" \

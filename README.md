@@ -29,7 +29,7 @@
 | 功能 | 器件 / 实现 | 状态 | 说明 |
 |---|---|---|---|
 | Wi-Fi | WCN7850 / `ath12k` | ✅ | 支持联网、开机自动连接与低延迟模式（默认关闭无线省电休眠）。 |
-| 5G / LTE 移动数据 | 骁龙 X70 / QRTR / ModemManager | ✅ | 支持蜂窝移动数据、Wi-Fi 断外网自动切换至 5G，以及掉网自动重连自愈。 |
+| 5G / LTE 移动数据 | 骁龙 X70 / QRTR / ModemManager | ✅ | 支持蜂窝移动数据、Wi-Fi 断外网自动切换至 5G（默认使用国内 HTTP 204 探针，海外用户可在 `/etc/NetworkManager/conf.d/` 覆盖 `[connectivity] uri=`），以及掉网自动重连自愈。 |
 | 蓝牙 | WCN7850 / BlueZ / PipeWire | ✅ | 支持蓝牙键鼠、手柄及蓝牙音频连接。 |
 | USB-C 接口 | DWC3 双角色 / UCSI | ✅ | 支持 USB NCM 有线网络，以及通过 OTG/扩展坞连接 U 盘、外置硬盘（exFAT / NTFS3）、键鼠、USB 声卡与有线网卡（含 2.5G/5G）。 |
 

@@ -1,12 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Allow active local or remote administrators (sudo group) to toggle the
-// phone's physical screen DPMS or synchronized panel/touch refresh rate from
-// the top-bar tray without requiring passwordless sudoers.
+// Allow active local or remote administrators (sudo group) to run scoped
+// salami-ctl hardware and read-only diagnostic commands via pkexec without
+// passwordless sudoers. System daemon lifecycle operations (`service`) are
+// intentionally excluded so passworded administrators still authenticate.
 polkit.addRule(function(action, subject) {
-    if (subject.active && subject.isInGroup("sudo") &&
-        action.id === "org.freedesktop.policykit.exec" &&
-        (action.lookup("program") === "/usr/bin/salami-ctl" ||
-         action.lookup("program") === "/usr/lib/salami/salami-ctl")) {
+    if (!subject.active || !subject.isInGroup("sudo") ||
+        action.id !== "org.freedesktop.policykit.exec") {
+        return;
+    }
+    var program = action.lookup("program");
+    if (program !== "/usr/bin/salami-ctl" &&
+        program !== "/usr/lib/salami/salami-ctl") {
+        return;
+    }
+    var cmdline = action.lookup("command_line") || "";
+    var allowed = /^\/usr\/(?:bin|lib\/salami)\/salami-ctl (?:screen (?:status|on|off|toggle)|refresh (?:status|60|90|120)|vooc (?:status|on|off|toggle)(?: (?:--persist|--cool (?:[0-9]|[12][0-9]|3[0-2]))){0,2}|modem recover|security(?: --json)?|fstrim)$/;
+    if (allowed.test(cmdline)) {
         return polkit.Result.YES;
     }
 });

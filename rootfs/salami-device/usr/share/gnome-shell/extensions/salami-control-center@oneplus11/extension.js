@@ -39,23 +39,29 @@ function formatPowerDesc(watts, status) {
     return `${absW.toFixed(1)} W`;
 }
 
-function runCtlAsync(args, onDone = null) {
+function runCtlAsync(args, onDone = null, cancellable = null) {
     try {
         const proc = Gio.Subprocess.new(
             [SALAMI_CTL, ...args],
             Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
         );
-        proc.communicate_utf8_async(null, null, (p, res) => {
+        proc.communicate_utf8_async(null, cancellable, (p, res) => {
             try {
                 const [, stdout, stderr] = p.communicate_utf8_finish(res);
+                if (cancellable?.is_cancelled())
+                    return;
                 const ok = p.get_successful();
                 onDone?.(ok, (stdout ?? '').trim(), (stderr ?? '').trim());
             } catch (e) {
+                if (cancellable?.is_cancelled() ||
+                    e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                    return;
                 onDone?.(false, '', String(e));
             }
         });
     } catch (e) {
-        onDone?.(false, '', String(e));
+        if (!cancellable?.is_cancelled())
+            onDone?.(false, '', String(e));
     }
 }
 
@@ -64,6 +70,8 @@ class SalamiTopBarButton extends PanelMenu.Button {
     _init() {
         super._init(1.0, 'OnePlus 11 Control Center', false);
 
+        this._destroyed = false;
+        this._cancellable = new Gio.Cancellable();
         this._statusData = null;
         this._netData = null;
         this._timedChargeTag = null;
@@ -306,12 +314,14 @@ class SalamiTopBarButton extends PanelMenu.Button {
     _runAction(args, errTitle, {refreshNet = false, okTitle = null, okFallback = ''} = {}) {
         this.menu.close();
         runCtlAsync(args, (ok, out, err) => {
+            if (this._destroyed)
+                return;
             if (!ok)
                 Main.notify(errTitle, err || out || '执行失败');
             else if (okTitle)
                 Main.notify(okTitle, out || okFallback);
             this.refreshAll(refreshNet);
-        });
+        }, this._cancellable);
     }
 
     _addSubItem(label, mark, onActivate, sensitive = true) {
@@ -567,8 +577,10 @@ class SalamiTopBarButton extends PanelMenu.Button {
             this._addSubItem('运行一键系统体检 (Doctor)', '', () => {
                 this.menu.close();
                 runCtlAsync(['doctor'], (_ok, out, err) => {
+                    if (this._destroyed)
+                        return;
                     Main.notify('一加 11 系统体检', out || err || '体检已完成');
-                });
+                }, this._cancellable);
             });
             this._addSubItem('重连自愈 5G 蜂窝基带', '', () => {
                 this._runAction(['modem', 'recover'], '5G 基带重连失败', {
@@ -619,8 +631,10 @@ class SalamiTopBarButton extends PanelMenu.Button {
     }
 
     refreshAll(includeNet = false) {
+        if (this._destroyed)
+            return;
         runCtlAsync(['status', '--json'], (ok, stdout) => {
-            if (!ok || !stdout)
+            if (this._destroyed || !ok || !stdout)
                 return;
             try {
                 this._statusData = JSON.parse(stdout);
@@ -628,10 +642,10 @@ class SalamiTopBarButton extends PanelMenu.Button {
             } catch {
                 // ignore malformed output
             }
-        });
+        }, this._cancellable);
         if (includeNet || !this._netData) {
             runCtlAsync(['net', '--json'], (ok, stdout) => {
-                if (!ok || !stdout)
+                if (this._destroyed || !ok || !stdout)
                     return;
                 try {
                     this._netData = JSON.parse(stdout);
@@ -639,13 +653,13 @@ class SalamiTopBarButton extends PanelMenu.Button {
                 } catch {
                     // ignore malformed output
                 }
-            });
+            }, this._cancellable);
         }
     }
 
     _renderSummary() {
         const st = this._statusData;
-        if (!st || !this._panelLabel)
+        if (this._destroyed || !st || !this._panelLabel)
             return;
 
         const bat = st.battery ?? {};
@@ -713,6 +727,11 @@ class SalamiTopBarButton extends PanelMenu.Button {
     }
 
     destroy() {
+        this._destroyed = true;
+        if (this._cancellable) {
+            this._cancellable.cancel();
+            this._cancellable = null;
+        }
         this._cancelHideFlyout();
         this._cancelPositionFlyout();
         this._activeFlyoutKey = null;

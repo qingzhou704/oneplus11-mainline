@@ -446,16 +446,15 @@ def run_tray() -> int:
                 perf_short = {"eco": "节能静音", "balanced": "日常均衡", "performance": "满血性能"}.get(pmode, pmode)
                 self.item_perf.set_label(f"性能模式  ({perf_short})")
 
-                end_thr = status["battery"].get("end_threshold_pct") or 80
+                end_raw = status["battery"].get("end_threshold_pct")
+                end_thr = 80 if end_raw is None else int(end_raw)
                 rem_s = status["battery"].get("restore_timer_remaining_s") or 0
                 if end_thr <= 80:
                     self.charge_radios["80"].set_active(True)
                 elif rem_s > 0:
                     target_key = "100_12h" if rem_s > 6 * 3600 else "100_6h"
                     self.charge_radios[target_key].set_active(True)
-                elif not any(
-                    self.charge_radios[k].get_active() for k in ("100_6h", "100_12h", "100_keep")
-                ):
+                else:
                     self.charge_radios["100_keep"].set_active(True)
                 vooc_on = bool(status["battery"].get("vooc_enabled"))
                 cool_lv = int(status["battery"].get("vooc_cool_down") or 0)
@@ -478,7 +477,8 @@ def run_tray() -> int:
                 if cfg_hz in self.ref_radios:
                     self.ref_radios[cfg_hz].set_active(True)
 
-                br_pct = int(status["display"].get("brightness_pct") or 50)
+                br_raw = status["display"].get("brightness_pct")
+                br_pct = 50 if br_raw is None else int(br_raw)
                 self.br_radios[nearest_preset(br_pct, BRIGHTNESS_PRESETS)].set_active(True)
                 self.item_display.set_label(f"屏幕与刷新率  ({'亮屏' if scr_on else '息屏'} · {cfg_hz}Hz)")
 
@@ -645,7 +645,10 @@ def run_tray() -> int:
                 return
             try:
                 _qp, desc = ctl.set_rdp_qp(preset_key)
-                self._notify("已更新远程桌面硬编预设", f"{desc}（下次重连生效）")
+                self._notify(
+                    "已更新远程桌面硬编预设",
+                    f"{desc}（远程登录重连生效；桌面共享需重启用户 GRD 服务）",
+                )
             except Exception as exc:  # noqa: BLE001
                 self._notify("设置 RDP 画质失败", str(exc))
             self.refresh()

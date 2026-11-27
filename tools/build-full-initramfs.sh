@@ -23,14 +23,15 @@ printf 'salami maintenance image\n' > "$out/extra/etc/maintenance"
 cp /etc/mke2fs.conf "$out/extra/etc/mke2fs.conf"
 
 cp "$(command -v tar)" "$out/extra/usr/bin/tar"
+cp "$(command -v xz)" "$out/extra/usr/bin/xz"
 for sbin_tool in dumpe2fs e2fsck mke2fs resize2fs sgdisk tune2fs; do
     cp "$(command -v "$sbin_tool")" "$out/extra/usr/sbin/$sbin_tool"
 done
 ln -snf e2fsck "$out/extra/usr/sbin/fsck.ext4"
 ln -snf mke2fs "$out/extra/usr/sbin/mkfs.ext4"
 
-# Copy shared libraries needed by tar, e2fsprogs, and sgdisk
-for bin in "$out/extra/usr/bin/tar" "$out/extra/usr/sbin/"*; do
+# Copy shared libraries needed by tar, xz, e2fsprogs, and sgdisk
+for bin in "$out/extra/usr/bin/"* "$out/extra/usr/sbin/"*; do
     [ -f "$bin" ] && [ ! -L "$bin" ] || continue
     ldd "$bin" | awk '/=> \// {print $3} /^\t\/lib/ {print $1}' | while read -r so; do
         [ -f "$so" ] || continue

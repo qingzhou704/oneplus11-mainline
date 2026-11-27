@@ -55,7 +55,7 @@ find_part() {
     printf '%s\n' "$found"
 }
 
-FORBIDDEN="super modem_a modem_b modemst1 modemst2 fsg fsc persist oplusstanvbk_a oplusstanvbk_b oplusdycnvbk boot_a boot_b init_boot_a init_boot_b"
+FORBIDDEN="super modem_a modem_b modemst1 modemst2 fsg fsc persist oplusstanvbk_a oplusstanvbk_b oplusdycnvbk boot_a boot_b init_boot_a init_boot_b vendor_boot_a vendor_boot_b dtbo_a dtbo_b vbmeta_a vbmeta_b"
 for p in $FORBIDDEN; do
     for u in /sys/class/block/*/uevent; do
         [ -f "$u" ] || continue
@@ -101,8 +101,10 @@ mount -t ext4 "$home_dev" "$mnt/home"
 
 if [ -n "$bt_mac" ]; then
     mkdir -p -m 755 "$mnt/var/lib/salami"
-    umask 077
-    printf '%s\n' "$bt_mac" > "$mnt/var/lib/salami/bluetooth-address"
+    (
+        umask 077
+        printf '%s\n' "$bt_mac" > "$mnt/var/lib/salami/bluetooth-address"
+    )
     chmod 600 "$mnt/var/lib/salami/bluetooth-address"
 fi
 

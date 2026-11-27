@@ -73,6 +73,7 @@ if [ "$1" = configure ]; then
     fi
     if [ -z "$2" ] || dpkg --compare-versions "$2" lt 0.40; then
         systemctl enable salami-ufs-tune.service salami-modem-guard.timer
+        rm -f /etc/NetworkManager/conf.d/60-salami-wifi-powersave.conf
     fi
     rm -rf /usr/lib/salami/__pycache__ 2>/dev/null || true
     if [ -w /var/lib ]; then
@@ -123,7 +124,6 @@ if [ "$1" = configure ]; then
             udevadm trigger --action=change --subsystem-match=cpu --subsystem-match=module || true
         fi
         if [ -z "$2" ] || dpkg --compare-versions "$2" lt 0.40; then
-            rm -f /etc/NetworkManager/conf.d/60-salami-wifi-powersave.conf
             udevadm trigger --action=change --subsystem-match=module --subsystem-match=block || true
             systemctl daemon-reload
             systemctl reload NetworkManager.service || true
@@ -132,6 +132,9 @@ if [ "$1" = configure ]; then
         fi
         if [ -z "$2" ] || dpkg --compare-versions "$2" lt 0.41; then
             sysctl --system >/dev/null 2>&1 || true
+        fi
+        if [ -n "$2" ] && dpkg --compare-versions "$2" lt 0.45; then
+            udevadm trigger --action=change --subsystem-match=video4linux || true
         fi
     fi
 fi

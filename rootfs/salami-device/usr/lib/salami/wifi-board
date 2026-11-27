@@ -3,7 +3,7 @@
 # kiwi/bdwlan.elf) crashes the linux-firmware WLAN firmware while it is downloaded.
 # Serve the Qualcomm reference phone's (QRD) board data and the generic regdb from
 # linux-firmware under this board's name instead.
-# ponytail: generic calibration; replace once the phone's own board data loads.
+# NOTE: generic calibration; replace once the phone's own board data loads.
 import struct, subprocess, sys
 sys.dont_write_bytecode = True
 

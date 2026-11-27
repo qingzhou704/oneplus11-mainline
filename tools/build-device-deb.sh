@@ -28,12 +28,24 @@ aarch64-linux-gnu-gcc -O2 -ffreestanding -nostdlib -shared -fPIC -Wl,-z,noexecst
 chmod 644 "$pkg/usr/lib/salami/libllvm-host-cpu.so"
 # AudioReach topology: set AUDIOREACH_TOPOLOGY_DIR to a checkout of
 # https://github.com/linux-msm/audioreach-topology (needs m4, alsatplg).
-tplg_src=${AUDIOREACH_TOPOLOGY_DIR:-$here/../../sources/audioreach-topology}
-[ -d "$tplg_src" ] || { echo "missing audioreach-topology directory: set AUDIOREACH_TOPOLOGY_DIR ($tplg_src)" >&2; exit 2; }
+tplg_src=${AUDIOREACH_TOPOLOGY_DIR:-}
+if [ -z "$tplg_src" ] && [ -d "$here/../../sources/audioreach-topology" ]; then
+    tplg_src="$here/../../sources/audioreach-topology"
+fi
+[ -n "$tplg_src" ] && [ -d "$tplg_src" ] || {
+    echo "missing audioreach-topology directory: set AUDIOREACH_TOPOLOGY_DIR to a checkout of https://github.com/linux-msm/audioreach-topology" >&2
+    exit 2
+}
 tplg=$pkg/usr/lib/firmware/qcom/sm8550/salamisnd-tplg.bin
 mkdir -p "$(dirname "$tplg")"
 m4 -I "$here/audio" -I "$tplg_src" "$here/audio/salamisnd.m4" > "$out/salamisnd.conf"
 alsatplg -c "$out/salamisnd.conf" -o "$tplg"
 chmod 644 "$tplg"
+# Register every packaged file under /etc as a Debian conffile so upgrades never silently
+# overwrite persisted user settings (refresh rate, VOOC policy, sshd/NM overrides).
+if [ -d "$pkg/etc" ]; then
+    (cd "$pkg" && find etc -type f | LC_ALL=C sort | sed 's|^|/|') > "$pkg/DEBIAN/conffiles"
+    chmod 644 "$pkg/DEBIAN/conffiles"
+fi
 dpkg-deb --root-owner-group -Zxz --build "$pkg" "$out/salami-device.deb" >/dev/null
 sha256sum "$out/salami-device.deb"

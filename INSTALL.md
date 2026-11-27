@@ -74,9 +74,15 @@ touch /run/keep
 - `linux_home`：剩余空间
 
 ### 3. 写入桌面根文件系统
-将 `rootfs.tar.xz` 与仓库中的 `tools/install-clean-system.sh` 传入维护环境并执行（将蓝牙地址替换为你自己在第 1 步备份的地址）：
+维护环境运行在内存中（`/run` 为 tmpfs），可通过电脑起一个临时 HTTP 文件服务将 `rootfs.tar.xz` 与 `tools/install-clean-system.sh` 拉入手机：
 ```sh
-sh install-clean-system.sh /path/to/rootfs.tar.xz AA:BB:CC:DD:EE:FF
+# 电脑端：在存放 rootfs.tar.xz 与 install-clean-system.sh 的目录执行
+python3 -m http.server 8000 --bind 192.168.77.10
+
+# 手机维护壳（telnet 192.168.77.2 2323）内执行，将蓝牙地址替换为第 1 步备份的本机地址
+wget http://192.168.77.10:8000/install-clean-system.sh -O /run/install-clean-system.sh
+wget http://192.168.77.10:8000/rootfs.tar.xz -O /run/rootfs.tar.xz
+sh /run/install-clean-system.sh /run/rootfs.tar.xz AA:BB:CC:DD:EE:FF
 ```
 
 ### 4. 刷入 `boot_a` 并重启进入 Ubuntu

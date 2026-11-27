@@ -41,6 +41,19 @@ jobs:
             gdisk git gnupg libssl-dev m4 make mmdebstrap pahole patch perl \
             python3 qemu-user-static rsync tar xz-utils zstd
 
+      - name: Run all offline unit & hygiene test suites
+        run: |
+          python3 tests/test-opensource-cleanliness.py
+          python3 tests/test-desktop-rootfs.py
+          python3 tests/test-device-postinst-offline.py
+          python3 tests/test-import-gpu-firmware.py
+          python3 tests/test-power-key.py
+          python3 tests/test-salami-ctl.py
+          python3 tests/test-salami-tray.py
+          python3 tests/test-extensions-and-scripts.py
+          python3 tests/test-mozilla-cache.py
+          sh tests/import-modem-data.sh
+
       - name: Restore ccache for fast incremental kernel builds
         uses: actions/cache@v4
         with:
@@ -59,17 +72,34 @@ jobs:
           git -C /var/tmp/src/kernel checkout FETCH_HEAD
           sh tools/apply-kernel-patches.sh /var/tmp/src/kernel
 
-          git clone --depth=1 https://github.com/linux-msm/audioreach-topology.git /var/tmp/src/audioreach-topology
-          git clone --depth=1 https://android.googlesource.com/platform/system/tools/mkbootimg /var/tmp/src/mkbootimg
-          git clone --depth=1 https://android.googlesource.com/platform/external/avb /var/tmp/src/avb
+          git init /var/tmp/src/audioreach-topology
+          git -C /var/tmp/src/audioreach-topology fetch --depth=1 \
+            https://github.com/linux-msm/audioreach-topology.git \
+            d6bb205aca5f4b8fa6b2f44cf8b5f6a081cbf037
+          git -C /var/tmp/src/audioreach-topology checkout FETCH_HEAD
+
+          git init /var/tmp/src/mkbootimg
+          git -C /var/tmp/src/mkbootimg fetch --depth=1 \
+            https://android.googlesource.com/platform/system/tools/mkbootimg \
+            954bc3ead5e679005fddf3484d247f2557b3c2c9
+          git -C /var/tmp/src/mkbootimg checkout FETCH_HEAD
+
+          git init /var/tmp/src/avb
+          git -C /var/tmp/src/avb fetch --depth=1 \
+            https://android.googlesource.com/platform/external/avb \
+            c92ce4cb9a1b6d20a1bc11b7e5864af9f78615bb
+          git -C /var/tmp/src/avb checkout FETCH_HEAD
 
       - name: Build ARM64 initramfs & Linux 7.3.5 kernel (boot.img + .deb)
+        env:
+          INPUT_LOCALVERSION: ${{ inputs.localversion }}
         run: |
           export PATH="/usr/lib/ccache:$PATH"
-          export CROSS_COMPILE="ccache aarch64-linux-gnu-"
+          export CROSS_COMPILE="aarch64-linux-gnu-"
           export MKBOOTIMG=/var/tmp/src/mkbootimg/mkbootimg.py
           export AVBTOOL=/var/tmp/src/avb/avbtool.py
-          lv="${{ inputs.localversion || '-salami068' }}"
+          lv="${INPUT_LOCALVERSION:--salami068}"
+          case "$lv" in *[!a-zA-Z0-9._+-]*) echo "invalid localversion: $lv" >&2; exit 2;; esac
 
           sh tools/build-full-initramfs.sh /var/tmp/src/kernel /var/tmp/initramfs "ci${lv}"
           sh tools/build-kernel.sh \
@@ -119,11 +149,10 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          tag="${{ inputs.release_tag }}"
-          if [ -z "$tag" ]; then
-            tag="${GITHUB_REF#refs/tags/}"
-          fi
+          tag="${INPUT_RELEASE_TAG:-${GITHUB_REF#refs/tags/}}"
+          case "$tag" in ''|*[!a-zA-Z0-9._+-]*) echo "invalid release tag: $tag" >&2; exit 2;; esac
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" release-dist/* --clobber
           else

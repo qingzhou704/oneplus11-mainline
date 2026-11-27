@@ -30,7 +30,8 @@ KCONFIG_CONFIG="$b/.config" "$k/scripts/kconfig/merge_config.sh" -m -O "$b" \
 make -C "$k" O="$b" ARCH=arm64 CROSS_COMPILE="$cc_prefix" LOCALVERSION= olddefconfig
 make -C "$k" O="$b" ARCH=arm64 CROSS_COMPILE="$cc_prefix" LOCALVERSION= \
     -j"$(nproc)" Image modules qcom/sm8550-oneplus-salami.dtb
-cat "$b/arch/arm64/boot/dts/qcom/sm8550-oneplus-salami.dtb" >> "$b/arch/arm64/boot/Image"
+# Never append in place to kbuild's Image; incremental rebuilds would append the DTB twice.
+cat "$b/arch/arm64/boot/Image" "$b/arch/arm64/boot/dts/qcom/sm8550-oneplus-salami.dtb" > "$b/Image-dtb"
 
 rm -rf "$o"
 mkdir -p "$o"

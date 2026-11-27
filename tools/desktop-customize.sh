@@ -150,13 +150,16 @@ for unit in ssh.service ssh.socket salami-ssh-hostkeys.service salami-debug-shel
     chroot "$r" systemctl disable "$unit" 2>/dev/null || true
 done
 chroot "$r" systemctl mask ssh.service ssh.socket salami-debug-shell.socket
-# A user can unmask/enable SSH later; that action generates this device's host keys.
-install -d "$r/etc/systemd/system/ssh.service.d"
+# A user can unmask/enable SSH later (either ssh.service or socket-activated ssh@.service);
+# either path generates this device's host keys before sshd accepts connections.
+install -d "$r/etc/systemd/system/ssh.service.d" "$r/etc/systemd/system/ssh@.service.d"
 cat > "$r/etc/systemd/system/ssh.service.d/50-salami-hostkeys.conf" <<'EOF'
 [Unit]
 Requires=salami-ssh-hostkeys.service
 After=salami-ssh-hostkeys.service
 EOF
+cp "$r/etc/systemd/system/ssh.service.d/50-salami-hostkeys.conf" \
+    "$r/etc/systemd/system/ssh@.service.d/50-salami-hostkeys.conf"
 # No GDM auto-login, no seeded ordinary user, no passwordless sudo.
 awk -F: '$3 >= 1000 && $3 < 60000 { found=1; print "unexpected ordinary user: " $1 > "/dev/stderr" } END { exit found }' "$r/etc/passwd"
 chroot "$r" passwd -l root

@@ -44,12 +44,15 @@ trap cleanup EXIT
 
 chroot "$work/root" sh -eux <<'CHROOT_EOF'
 export DEBIAN_FRONTEND=noninteractive
+export DEBEMAIL="noreply@localhost"
+export DEBFULLNAME="OnePlus 11 mainline port"
 apt-get update
 mkdir -p /tmp/out /tmp/work
 
 # 1. rmtfs (+salami1 with OEM NV mappings)
 cd /tmp/work
 curl -fsSL https://github.com/linux-msm/rmtfs/archive/291e16dbd1f1c2cfc660ea7f77767571185e1a3a.tar.gz -o rmtfs-src.tar.gz
+printf '%s  %s\n' cfaae038a5f1f43a8f15bef2a4ec26ca047746b9d2ff64e6ab43ad3cb135a033 rmtfs-src.tar.gz | sha256sum -c -
 apt-get download rmtfs
 base_rmtfs=$(ls rmtfs_*.deb | head -n 1)
 mkdir rmtfs-src && tar -xzf rmtfs-src.tar.gz -C rmtfs-src --strip-components=1
@@ -67,26 +70,35 @@ cd qcom-va-driver
 git checkout 0980a1de
 apt-get build-dep -y .
 DEB_BUILD_OPTIONS="parallel=$(nproc) nocheck" dpkg-buildpackage -b -uc -us
-cp /tmp/work/qcom-va-driver_*.deb /tmp/out/qcom-va-driver.deb
+qva_deb=$(ls /tmp/work/qcom-va-driver_*_arm64.deb | head -n 1)
+cp "$qva_deb" /tmp/out/qcom-va-driver.deb
 
-# 3. gnome-initial-setup (+salami3 optional password)
+# 3. gnome-initial-setup (+salami optional password)
 mkdir -p /tmp/work/gis && cd /tmp/work/gis
 apt-get build-dep -y gnome-initial-setup
 apt-get source gnome-initial-setup
 cd gnome-initial-setup-*
-patch -p1 < /tmp/patches/gnome-initial-setup-50.0-optional-password.patch
+case "$(dpkg-parsechangelog -S Version)" in
+    50.0-*) ;;
+    *) echo "unexpected gnome-initial-setup upstream version: $(dpkg-parsechangelog -S Version)" >&2; exit 1 ;;
+esac
+patch --fuzz=0 -p1 < /tmp/patches/gnome-initial-setup-50.0-optional-password.patch
 dch --local +salami "Allow optional empty password on local initial setup"
 DEB_BUILD_OPTIONS="parallel=$(nproc) nocheck" dpkg-buildpackage -b -uc -us
 cp /tmp/work/gis/gnome-initial-setup_*+salami*_arm64.deb /tmp/out/gnome-initial-setup.deb
 
-# 4. gnome-remote-desktop (+salami3 implicit-sync + VA-API inband + QP)
+# 4. gnome-remote-desktop (+salami implicit-sync + VA-API inband + QP)
 mkdir -p /tmp/work/grd && cd /tmp/work/grd
 apt-get build-dep -y gnome-remote-desktop
 apt-get source gnome-remote-desktop
 cd gnome-remote-desktop-*
-patch -p1 < /tmp/patches/gnome-remote-desktop-50.2-implicit-sync.patch
-patch -p1 < /tmp/patches/gnome-remote-desktop-50.2-vaapi-inband-headers.patch
-patch -p1 < /tmp/patches/gnome-remote-desktop-50.2-vaapi-qp-env.patch
+case "$(dpkg-parsechangelog -S Version)" in
+    50.2-*) ;;
+    *) echo "unexpected gnome-remote-desktop upstream version: $(dpkg-parsechangelog -S Version)" >&2; exit 1 ;;
+esac
+patch --fuzz=0 -p1 < /tmp/patches/gnome-remote-desktop-50.2-implicit-sync.patch
+patch --fuzz=0 -p1 < /tmp/patches/gnome-remote-desktop-50.2-vaapi-inband-headers.patch
+patch --fuzz=0 -p1 < /tmp/patches/gnome-remote-desktop-50.2-vaapi-qp-env.patch
 dch --local +salami "Add DMABUF implicit-sync fallback and Qualcomm Iris VA-API hardware encoding"
 DEB_BUILD_OPTIONS="parallel=$(nproc) nocheck" dpkg-buildpackage -b -uc -us
 cp /tmp/work/grd/gnome-remote-desktop_*+salami*_arm64.deb /tmp/out/gnome-remote-desktop.deb

@@ -166,6 +166,7 @@ def main():
     mapping = mountpoint.name
     mapped = False
     mounted = False
+    primary_err = None
     try:
         subprocess.run(
             ["dmsetup", "create", mapping, "--readonly", "--table", table],
@@ -179,12 +180,27 @@ def main():
         )
         mounted = True
         copy_missing_from_mount(mountpoint, missing)
+    except BaseException as exc:
+        primary_err = exc
+        raise
     finally:
+        cleanup_err = None
         if mounted:
-            subprocess.run(["umount", str(mountpoint)], check=True)
+            try:
+                subprocess.run(["umount", str(mountpoint)], check=True)
+            except BaseException as exc:
+                cleanup_err = cleanup_err or exc
         if mapped:
-            subprocess.run(["dmsetup", "remove", mapping], check=True)
-        mountpoint.rmdir()
+            try:
+                subprocess.run(["dmsetup", "remove", mapping], check=True)
+            except BaseException as exc:
+                cleanup_err = cleanup_err or exc
+        try:
+            mountpoint.rmdir()
+        except OSError as exc:
+            cleanup_err = cleanup_err or exc
+        if primary_err is None and cleanup_err is not None:
+            raise cleanup_err
 
 
 if __name__ == "__main__":

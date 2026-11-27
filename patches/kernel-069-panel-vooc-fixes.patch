@@ -1,0 +1,151 @@
+From 30af9bcae3e7588a91660642310d05cdc16fad0e Mon Sep 17 00:00:00 2001
+From: OnePlus 11 mainline port <noreply@localhost>
+Date: Fri, 27 Nov 2026 04:57:43 -0500
+Subject: [PATCH] drm/panel: amb670yf07, power: qcom_battmgr: fix power-off
+ race and VOOC cool_down error handling
+
+Track driver-owned prepared and enabled state under ctx->lock in
+panel-samsung-amb670yf07 so concurrent refresh/HBM/backlight updates cannot
+issue MIPI DSI transfers during disable or after unprepare powers off the
+panel before DRM core clears panel->prepared.
+
+Also propagate qcom_battmgr_request_property() errors in
+qcom_battmgr_vooc_cool_set() and only update vooc_cool_down on success.
+---
+ .../gpu/drm/panel/panel-samsung-amb670yf07.c  | 26 +++++++++++++++----
+ drivers/power/supply/qcom_battmgr.c           | 13 +++++-----
+ 2 files changed, 28 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/gpu/drm/panel/panel-samsung-amb670yf07.c b/drivers/gpu/drm/panel/panel-samsung-amb670yf07.c
+index 3d9910e6a..879612802 100644
+--- a/drivers/gpu/drm/panel/panel-samsung-amb670yf07.c
++++ b/drivers/gpu/drm/panel/panel-samsung-amb670yf07.c
+@@ -39,6 +39,8 @@ struct amb670yf07 {
+ 	struct iris7_bypass *iris;
+ 	struct mutex lock;
+ 	const struct amb670yf07_rate *rate;
++	bool prepared;
++	bool enabled;
+ 	bool hbm;
+ };
+ 
+@@ -185,7 +187,7 @@ static int amb670yf07_refresh_set(const char *val, const struct kernel_param *kp
+ 	ctx = amb670yf07_active;
+ 	if (ctx) {
+ 		mutex_lock(&ctx->lock);
+-		if (ctx->panel.prepared && ctx->rate != rate)
++		if (ctx->prepared && ctx->enabled && ctx->rate != rate)
+ 			ret = amb670yf07_switch_rate_locked(ctx, rate);
+ 		else
+ 			ctx->rate = rate;
+@@ -220,7 +222,7 @@ static int amb670yf07_hbm_set(const char *val, const struct kernel_param *kp)
+ 	ctx = amb670yf07_active;
+ 	if (ctx) {
+ 		mutex_lock(&ctx->lock);
+-		if (ctx->panel.prepared) {
++		if (ctx->prepared && ctx->enabled) {
+ 			ret = amb670yf07_apply_hbm_locked(ctx, enable);
+ 			if (!ret) {
+ 				ctx->hbm = enable;
+@@ -318,16 +320,21 @@ static int amb670yf07_prepare(struct drm_panel *panel)
+ 
+ 	ret = amb670yf07_init(ctx);
+ 	if (!ret) {
++		ctx->prepared = true;
+ 		mutex_unlock(&ctx->lock);
+ 		return 0;
+ 	}
+ power_off:
++	ctx->prepared = false;
++	ctx->enabled = false;
+ 	err = amb670yf07_power_off(ctx);
+ 	if (err)
+ 		dev_err(&ctx->dsi->dev, "power-off after failed prepare: %d\n", err);
+ 	mutex_unlock(&ctx->lock);
+ 	return ret;
+ iris_off:
++	ctx->prepared = false;
++	ctx->enabled = false;
+ 	err = iris7_bypass_power_off(ctx->iris);
+ 	if (err)
+ 		dev_err(&ctx->dsi->dev, "Iris rollback failed: %d\n", err);
+@@ -340,10 +347,14 @@ static int amb670yf07_enable(struct drm_panel *panel)
+ 	struct amb670yf07 *ctx = to_amb670yf07(panel);
+ 	int ret;
+ 
+-	if (!panel->prepared)
+-		return -EIO;
+ 	mutex_lock(&ctx->lock);
++	if (!ctx->prepared) {
++		mutex_unlock(&ctx->lock);
++		return -EIO;
++	}
+ 	ret = mipi_dsi_dcs_set_display_on(ctx->dsi);
++	if (!ret)
++		ctx->enabled = true;
+ 	mutex_unlock(&ctx->lock);
+ 	if (ret)
+ 		return dev_err_probe(&ctx->dsi->dev, ret, "display-on command failed\n");
+@@ -357,6 +368,7 @@ static int amb670yf07_disable(struct drm_panel *panel)
+ 	int ret;
+ 
+ 	mutex_lock(&ctx->lock);
++	ctx->enabled = false;
+ 	ctx->hbm = false;
+ 	hbm = false;
+ 	ret = mipi_dsi_dcs_set_display_off(ctx->dsi);
+@@ -371,6 +383,10 @@ static int amb670yf07_unprepare(struct drm_panel *panel)
+ 	int ret, err;
+ 
+ 	mutex_lock(&ctx->lock);
++	ctx->prepared = false;
++	ctx->enabled = false;
++	ctx->hbm = false;
++	hbm = false;
+ 	ret = mipi_dsi_dcs_enter_sleep_mode(ctx->dsi);
+ 	msleep(101);
+ 	usleep_range(2000, 2100);
+@@ -437,7 +453,7 @@ static int amb670yf07_bl_update(struct backlight_device *bl)
+ 	int ret = 0;
+ 
+ 	mutex_lock(&ctx->lock);
+-	if (!ctx->panel.prepared) {
++	if (!ctx->prepared) {
+ 		mutex_unlock(&ctx->lock);
+ 		return 0;
+ 	}
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index 4d39c6106..746c7daac 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -2638,20 +2638,21 @@ static int qcom_battmgr_vooc_cool_set(const char *val, const struct kernel_param
+ 	if (level > 32)
+ 		return -EINVAL;
+ 
+-	WRITE_ONCE(vooc_cool_down, level);
+ 	mutex_lock(&qcom_battmgr_vooc_lock);
+ 	battmgr = qcom_battmgr_vooc_dev;
+ 	if (battmgr) {
+ 		mutex_lock(&battmgr->lock);
+ 		if (battmgr->service_up && battmgr->oplus.vooc.enabled)
+-			qcom_battmgr_request_property(battmgr,
+-						      BATTMGR_BAT_PROPERTY_SET,
+-						      OPLUS_SM8550_BATT_SET_COOL_DOWN,
+-						      level);
++			ret = qcom_battmgr_request_property(battmgr,
++							    BATTMGR_BAT_PROPERTY_SET,
++							    OPLUS_SM8550_BATT_SET_COOL_DOWN,
++							    level);
+ 		mutex_unlock(&battmgr->lock);
+ 	}
++	if (!ret)
++		WRITE_ONCE(vooc_cool_down, level);
+ 	mutex_unlock(&qcom_battmgr_vooc_lock);
+-	return 0;
++	return ret;
+ }
+ 
+ static const struct kernel_param_ops qcom_battmgr_vooc_cool_ops = {
+-- 
+2.53.0
+

@@ -114,6 +114,14 @@ class OfflinePostinst(unittest.TestCase):
         self.assertNotIn('start ', calls)
         self.assertNotIn('restart ', calls)
 
+    def test_offline_upgrade_from_044_has_no_runtime_operations(self):
+        calls = self._run_offline('configure', '0.44')
+        self.assertNotIn('udevadm', calls)
+        self.assertNotIn('sysctl', calls)
+        self.assertNotIn('daemon-reload', calls)
+        self.assertNotIn('start ', calls)
+        self.assertNotIn('restart ', calls)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

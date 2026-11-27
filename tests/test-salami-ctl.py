@@ -344,6 +344,14 @@ class SalamiCtlTests(unittest.TestCase):
         self.assertTrue(st2["enabled"])
         self.assertEqual(st2["cool_down"], 0)
         self.assertEqual(st2["configured"], True)
+        self.assertNotIn("vooc_cool_down=", self.paths.vooc_modprobe_conf.read_text(encoding="utf-8"))
+
+        # Persisting cool_down writes both vooc and vooc_cool_down, including action='status'
+        st3 = salami_ctl.set_vooc_state("status", cool_down=8, persist=True, paths=self.paths)
+        self.assertTrue(st3["enabled"])
+        self.assertEqual(st3["cool_down"], 8)
+        conf3 = self.paths.vooc_modprobe_conf.read_text(encoding="utf-8")
+        self.assertIn("options qcom_battmgr vooc=1 vooc_cool_down=8\n", conf3)
 
     def test_touch_glove_power_mode_and_screen_off_policy(self):
         self.assertFalse(salami_ctl.get_touch_status(self.paths)["glove_enabled"])
@@ -448,10 +456,94 @@ class SalamiCtlTests(unittest.TestCase):
         self.assertFalse(st["persisted"])
         self.assertFalse(self.paths.refresh_modprobe_conf.exists())
 
+        # Failing to apply runtime sysfs with --no-persist must fail closed, not exit 0
+        self.paths.panel_refresh_param.unlink()
+        self.paths.touch_refresh_param.unlink()
+        with self.assertRaises(FileNotFoundError):
+            salami_ctl.set_refresh_rate(60, self.paths, persist=False)
+
+    def test_find_gsm_connection_and_disabled_optional_service_restart(self):
+        sample_nm = "aaa-111:802-11-wireless\nbbb-222:gsm\n"
+        with mock.patch.object(salami_ctl, "_run_cmd", return_value=sample_nm):
+            self.assertEqual(salami_ctl.find_gsm_connection_name(), "bbb-222")
+        with mock.patch.object(salami_ctl, "_run_cmd", return_value=""):
+            self.assertEqual(salami_ctl.find_gsm_connection_name(), "mobile")
+
+        sample_show = (
+            "Id=docker.service\nUnitFileState=disabled\nActiveState=inactive\n\n"
+            "Id=nginx.service\nUnitFileState=not-found\nActiveState=inactive\n"
+        )
+        with mock.patch.object(salami_ctl, "_run_cmd", return_value=sample_show):
+            allowed = salami_ctl.allowed_service_units(self.paths)
+        self.assertIn("docker.service", allowed)
+        self.assertNotIn("nginx.service", allowed)
+
+    def test_doctor_v4l2_by_name_all_ufs_luns_and_unreadable_sysctl(self):
+        r = Path(self.tmp.name)
+        self.paths.dri_dir = r / "dri"
+        self.paths.dev_dir = r / "dev"
+        self.paths.v4l2_sys_dir = r / "sys_v4l2"
+        self.paths.ufs_host_dir = r / "ufshc"
+        self.paths.va_driver_dir = r / "va"
+        self.paths.regdb_file = r / "regulatory.db"
+        self.paths.root_mount = r
+        self.paths.home_mount = r
+        for d in (
+            self.paths.dri_dir,
+            self.paths.dev_dir,
+            self.paths.v4l2_sys_dir / "video0",
+            self.paths.v4l2_sys_dir / "video2",
+            self.paths.v4l2_sys_dir / "video3",
+            self.paths.ufs_host_dir / "host0/target0:0:0/0:0:0:0/block/sda/queue",
+            self.paths.ufs_host_dir / "host0/target0:0:0/0:0:0:3/block/sdd/queue",
+            self.paths.va_driver_dir,
+        ):
+            d.mkdir(parents=True, exist_ok=True)
+        for f in (
+            self.paths.dri_dir / "renderD128",
+            self.paths.dev_dir / "video0",
+            self.paths.dev_dir / "video2",
+            self.paths.dev_dir / "video3",
+            self.paths.va_driver_dir / "qcom_drv_video.so",
+            self.paths.regdb_file,
+        ):
+            f.write_text("", encoding="utf-8")
+        # UVC webcam occupies video0 while Iris3 is shifted to video2/video3
+        self._write(self.paths.v4l2_sys_dir / "video0" / "name", "USB UVC Camera")
+        self._write(self.paths.v4l2_sys_dir / "video2" / "name", "qcom-iris-decoder")
+        self._write(self.paths.v4l2_sys_dir / "video3" / "name", "qcom-iris-encoder")
+        self._write(self.paths.ufs_host_dir / "host0/target0:0:0/0:0:0:0/block/sda/queue/scheduler", "[none] mq-deadline")
+        self._write(self.paths.ufs_host_dir / "host0/target0:0:0/0:0:0:3/block/sdd/queue/scheduler", "none [mq-deadline]")
+        for rel, expected in salami_ctl.SECURITY_SYSCTL_EXPECT:
+            p = self.paths.proc_sys_dir / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"{expected}\n", encoding="utf-8")
+        self.paths.cpu_vuln_dir.mkdir(parents=True, exist_ok=True)
+        (self.paths.cpu_vuln_dir / "meltdown").write_text("Not affected\n", encoding="utf-8")
+
+        orig_access = salami_ctl.os.access
+
+        def fake_access(path, mode):
+            if str(path).endswith("net/core/bpf_jit_harden") and mode == salami_ctl.os.R_OK:
+                return False
+            return orig_access(path, mode)
+
+        with mock.patch.object(salami_ctl.os, "access", side_effect=fake_access):
+            rep = salami_ctl.collect_doctor_report(self.paths, live_override=False)
+        by_id = {c["id"]: c for c in rep["checks"]}
+        self.assertEqual(by_id["gpu_video"]["status"], "PASS")
+        self.assertIn("/dev/video2", by_id["gpu_video"]["detail"])
+        self.assertEqual(by_id["storage_memory"]["status"], "WARN")
+        self.assertIn("sdd=mq-deadline", by_id["storage_memory"]["detail"])
+        self.assertEqual(by_id["security"]["status"], "WARN")
+        self.assertIn("net.core.bpf_jit_harden", by_id["security"]["detail"])
+
     def test_doctor_pass_warn_and_fail_diagnostics(self):
         r = Path(self.tmp.name)
         self.paths.dri_dir = r / "dri"
         self.paths.dev_dir = r / "dev"
+        self.paths.v4l2_sys_dir = r / "no_v4l2"
+        self.paths.ufs_host_dir = r / "no_ufshc"
         self.paths.va_driver_dir = r / "va"
         self.paths.regdb_file = r / "regulatory.db"
         self.paths.root_mount = r

@@ -38,7 +38,11 @@ jobs:
 
       - name: Clone AudioReach topology macros
         run: |
-          git clone --depth=1 https://github.com/linux-msm/audioreach-topology.git /tmp/audioreach-topology
+          git init /tmp/audioreach-topology
+          git -C /tmp/audioreach-topology fetch --depth=1 \
+            https://github.com/linux-msm/audioreach-topology.git \
+            d6bb205aca5f4b8fa6b2f44cf8b5f6a081cbf037
+          git -C /tmp/audioreach-topology checkout FETCH_HEAD
 
       - name: Build salami-device & passwordless policy packages
         run: |
